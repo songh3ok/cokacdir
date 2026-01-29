@@ -40,95 +40,6 @@ fn print_version() {
     println!("cokacdir {}", VERSION);
 }
 
-fn render_test(prompt: &str) {
-    use crate::ui::theme::Theme;
-    use crate::ui::ai_screen::{AIScreenState, HistoryItem, HistoryType};
-    use ratatui::backend::TestBackend;
-    use ratatui::Terminal;
-    use ratatui::layout::Rect;
-
-    // Check if Claude is available
-    if !claude::is_claude_available() {
-        eprintln!("Error: Claude CLI is not available.");
-        return;
-    }
-
-    // Execute Claude command
-    let current_dir = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| ".".to_string());
-    let response = claude::execute_command(prompt, None, &current_dir);
-
-    if !response.success {
-        eprintln!("Error: {}", response.error.unwrap_or_else(|| "Unknown error".to_string()));
-        return;
-    }
-
-    let content = response.response.unwrap_or_default();
-
-    // Create AI screen state and add messages
-    let mut state = AIScreenState::new(current_dir);
-    state.history.clear(); // Remove system warning
-
-    // Add user message
-    state.add_to_history(HistoryItem {
-        item_type: HistoryType::User,
-        content: prompt.to_string(),
-    });
-
-    // Add AI response
-    state.add_to_history(HistoryItem {
-        item_type: HistoryType::Assistant,
-        content: content.clone(),
-    });
-
-    // Create test terminal (80x24)
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
-
-    // Draw the AI screen
-    let theme = Theme::default();
-    terminal.draw(|frame| {
-        let area = Rect::new(0, 0, 80, 24);
-        crate::ui::ai_screen::draw(frame, &mut state, area, &theme);
-    }).unwrap();
-
-    // Get the buffer and print each line
-    let buffer = terminal.backend().buffer();
-    println!("=== TUI Rendered Output (80x24) ===");
-
-    let mut prev_was_empty = false;
-    let mut consecutive_empty = 0;
-    let mut max_consecutive = 0;
-
-    for y in 0..buffer.area.height {
-        let mut line = String::new();
-        for x in 0..buffer.area.width {
-            let cell = buffer.get(x, y);
-            line.push_str(cell.symbol());
-        }
-        let trimmed = line.trim_end();
-        let is_empty = trimmed.is_empty() || trimmed.chars().all(|c| c.is_whitespace() || c == '│' || c == '─' || c == '┌' || c == '┐' || c == '└' || c == '┘');
-
-        // Check for content lines (not borders)
-        let is_content_empty = line.trim().is_empty() ||
-            (line.contains('│') && line.replace('│', "").replace(' ', "").is_empty());
-
-        if is_content_empty {
-            consecutive_empty += 1;
-            max_consecutive = max_consecutive.max(consecutive_empty);
-        } else {
-            consecutive_empty = 0;
-        }
-
-        println!("Line {:2}: '{}'", y, trimmed);
-        prev_was_empty = is_empty;
-    }
-
-    println!("\n=== Analysis ===");
-    println!("Max consecutive empty content lines: {}", max_consecutive);
-}
-
 fn handle_prompt(prompt: &str) {
     use crate::ui::theme::Theme;
 
@@ -221,14 +132,6 @@ fn main() -> io::Result<()> {
                     return Ok(());
                 }
                 handle_prompt(&args[2]);
-                return Ok(());
-            }
-            "--render-test" => {
-                if args.len() < 3 {
-                    eprintln!("Error: --render-test requires a text argument");
-                    return Ok(());
-                }
-                render_test(&args[2]);
                 return Ok(());
             }
             _ => {

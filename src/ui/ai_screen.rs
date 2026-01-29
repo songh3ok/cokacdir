@@ -136,10 +136,6 @@ pub struct AIScreenState {
     pub last_visible_width: usize,
     /// Last known raw lines count before wrap (cached from draw)
     pub last_raw_lines: usize,
-    /// Debug mode: waiting for dummy line count input
-    pub debug_input_mode: bool,
-    /// Debug mode: accumulated number input
-    pub debug_input_buffer: String,
 }
 
 /// Maximum number of history items to retain
@@ -182,8 +178,6 @@ impl AIScreenState {
             last_visible_height: 0,
             last_visible_width: 0,
             last_raw_lines: 0,
-            debug_input_mode: false,
-            debug_input_buffer: String::new(),
         };
 
         // Add warning message as first line
@@ -233,8 +227,6 @@ impl AIScreenState {
             last_visible_height: 0,
             last_visible_width: 0,
             last_raw_lines: 0,
-            debug_input_mode: false,
-            debug_input_buffer: String::new(),
         }
     }
 
@@ -411,197 +403,6 @@ impl AIScreenState {
             self.history.clear();
             self.session_id = None;
             self.scroll_offset = 0;
-            return;
-        }
-
-        // Handle /debug command - enter debug mode for adding dummy lines
-        if user_input.to_lowercase() == "/debug" {
-            self.debug_input_mode = true;
-            self.debug_input_buffer.clear();
-            return;
-        }
-
-        // Handle /scroll command - show scroll debug info
-        if user_input.to_lowercase() == "/scroll" {
-            let info = format!(
-                "Scroll Debug Info:\n\
-                - scroll_offset: {}\n\
-                - last_max_scroll: {}\n\
-                - last_total_lines (wrapped): {}\n\
-                - last_raw_lines (before wrap): {}\n\
-                - last_visible_height: {}\n\
-                - last_visible_width: {}\n\
-                - auto_scroll: {}\n\
-                - history items: {}",
-                self.scroll_offset,
-                self.last_max_scroll,
-                self.last_total_lines,
-                self.last_raw_lines,
-                self.last_visible_height,
-                self.last_visible_width,
-                self.auto_scroll,
-                self.history.len()
-            );
-            self.add_to_history(HistoryItem {
-                item_type: HistoryType::System,
-                content: info,
-            });
-            return;
-        }
-
-        // Handle /lines command - show detailed line info
-        if user_input.to_lowercase() == "/lines" {
-            use crate::utils::markdown::{render_markdown, MarkdownTheme};
-            use crate::ui::theme::Theme;
-
-            let theme = Theme::default();
-            let md_theme = MarkdownTheme::from_theme(&theme);
-            let width = if self.last_visible_width > 0 { self.last_visible_width } else { 80 };
-
-            let mut info_lines: Vec<String> = vec!["Line Analysis:".to_string()];
-            let mut total_calculated = 0usize;
-
-            for (idx, item) in self.history.iter().enumerate() {
-                let type_str = match item.item_type {
-                    HistoryType::User => "User",
-                    HistoryType::Assistant => "Assistant",
-                    HistoryType::Error => "Error",
-                    HistoryType::System => "System",
-                };
-
-                let (icon, color) = match item.item_type {
-                    HistoryType::User => ("> ", theme.info),
-                    HistoryType::Assistant => ("< ", theme.success),
-                    HistoryType::Error => ("! ", theme.error),
-                    HistoryType::System => ("* ", theme.text_dim),
-                };
-                let prefix_style = Style::default().fg(color).add_modifier(Modifier::BOLD);
-
-                // Build actual Line objects like draw_history does
-                let mut item_line_objects: Vec<Line> = Vec::new();
-                if item.item_type == HistoryType::Assistant {
-                    let md_lines = render_markdown(&item.content, md_theme);
-                    for (i, md_line) in md_lines.into_iter().enumerate() {
-                        let prefix = if i == 0 { icon } else { "  " };
-                        let mut spans = vec![Span::styled(prefix, prefix_style)];
-                        spans.extend(md_line.spans);
-                        item_line_objects.push(Line::from(spans));
-                    }
-                } else {
-                    let content_lines: Vec<&str> = item.content.lines().collect();
-                    for (i, line_text) in content_lines.iter().enumerate() {
-                        let prefix = if i == 0 { icon } else { "  " };
-                        item_line_objects.push(Line::from(vec![
-                            Span::styled(prefix, prefix_style),
-                            Span::styled(line_text.to_string(), theme.normal_style()),
-                        ]));
-                    }
-                }
-
-                // Calculate wrapped lines using the same function as draw_history
-                let item_lines: usize = item_line_objects.iter()
-                    .map(|line| estimate_wrapped_lines(line, width))
-                    .sum();
-
-                total_calculated += item_lines + 1; // +1 for empty line between
-
-                info_lines.push(format!(
-                    "Item {}: {} - {} raw, {} wrapped (width={})",
-                    idx, type_str,
-                    item_line_objects.len(),
-                    item_lines,
-                    width
-                ));
-            }
-
-            info_lines.push(format!("Total calculated: {} (last_total_lines: {})",
-                total_calculated, self.last_total_lines));
-
-            self.add_to_history(HistoryItem {
-                item_type: HistoryType::System,
-                content: info_lines.join("\n"),
-            });
-            return;
-        }
-
-        // Handle /markdown command - show sample markdown
-        if user_input.to_lowercase() == "/markdown" || user_input.to_lowercase() == "/md" {
-            let sample_markdown = r#"# Markdown Sample
-
-## Headers
-### Level 3 Header
-#### Level 4 Header
-
-## Text Formatting
-This is **bold text** and this is *italic text*.
-You can also use _underscores for italic_ and ~~strikethrough~~.
-Mix them: ***bold and italic***
-
-## Code
-Inline `code` looks like this.
-
-```rust
-fn main() {
-    println!("Hello, World!");
-    let x = 42;
-}
-```
-
-```python
-def hello():
-    print("Hello from Python!")
-```
-
-## Table
-| 이름   | 나이 | 도시     |
-|--------|------|----------|
-| 홍길동 | 30   | 서울     |
-| 김철수 | 25   | 도쿄     |
-| Alice  | 35   | Beijing  |
-
-## Lists
-### Unordered
-- First item
-- Second item
-  - Nested item
-  - Another nested
-- Third item
-
-### Ordered
-1. First step
-2. Second step
-3. Third step
-
-### Checkboxes
-- [ ] Unchecked task
-- [x] Completed task
-- [ ] Another task
-
-## Blockquote
-> This is a blockquote.
-> It can span multiple lines.
->> Nested blockquote
-
-## Links
-Check out [Rust](https://rust-lang.org) for more info.
-
-## Horizontal Rule
----
-
-## Special Characters
-Korean: 안녕하세요! 한글 테스트입니다.
-Emoji: 🎉 🚀 ✨ (if supported)
-
----
-*End of sample*"#;
-
-            self.add_to_history(HistoryItem {
-                item_type: HistoryType::Assistant,
-                content: sample_markdown.to_string(),
-            });
-            if self.auto_scroll {
-                self.scroll_offset = usize::MAX;
-            }
             return;
         }
 
@@ -872,37 +673,6 @@ fn draw_history(frame: &mut Frame, state: &mut AIScreenState, area: Rect, theme:
         }
     }).collect();
 
-    // DEBUG: Write rendered lines to file for analysis
-    #[cfg(debug_assertions)]
-    {
-        use std::io::Write;
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open("/tmp/cokacdir_debug_lines.txt")
-        {
-            for (i, line) in lines.iter().enumerate() {
-                let content: String = line.spans.iter()
-                    .map(|s| s.content.as_ref())
-                    .collect();
-                let is_empty = is_line_empty(line);
-                let _ = writeln!(file, "Line {}: '{}' (empty: {})", i, content, is_empty);
-            }
-            let mut consecutive = 0;
-            let mut max = 0;
-            for line in &lines {
-                if is_line_empty(line) {
-                    consecutive += 1;
-                    max = max.max(consecutive);
-                } else {
-                    consecutive = 0;
-                }
-            }
-            let _ = writeln!(file, "\nMax consecutive empty: {}", max);
-        }
-    }
-
     // Calculate total wrapped lines by simulating ratatui's greedy word-wrap behavior
     let width = inner.width as usize;
     let total_lines: usize = if width == 0 {
@@ -992,16 +762,6 @@ fn draw_input(frame: &mut Frame, state: &AIScreenState, area: Rect, theme: &Them
             Span::styled("Processing... (Esc to cancel)", theme.dim_style()),
         ]);
         frame.render_widget(Paragraph::new(processing_line), inner);
-    } else if state.debug_input_mode {
-        // Debug mode: show prompt for number of dummy lines
-        let debug_line = Line::from(vec![
-            Span::styled("[DEBUG] ", Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)),
-            Span::styled("Enter number of dummy lines: ", theme.normal_style()),
-            Span::styled(&state.debug_input_buffer, Style::default().fg(theme.info)),
-            Span::styled("_", Style::default().fg(theme.border_active).add_modifier(Modifier::SLOW_BLINK)),
-            Span::styled(" (Enter=Add, Esc=Cancel)", theme.dim_style()),
-        ]);
-        frame.render_widget(Paragraph::new(debug_line), inner);
     } else if !state.claude_available {
         frame.render_widget(
             Paragraph::new(Span::styled(
@@ -1159,30 +919,6 @@ fn estimate_wrapped_lines(line: &Line, width: usize) -> usize {
     line_count
 }
 
-/// Generate a random lorem ipsum-like line
-fn generate_lorem_line(line_num: usize) -> String {
-    const WORDS: &[&str] = &[
-        "lorem", "ipsum", "dolor", "sit", "amet", "consectetur", "adipiscing", "elit",
-        "sed", "do", "eiusmod", "tempor", "incididunt", "ut", "labore", "et", "dolore",
-        "magna", "aliqua", "enim", "ad", "minim", "veniam", "quis", "nostrud",
-        "exercitation", "ullamco", "laboris", "nisi", "aliquip", "ex", "ea", "commodo",
-        "consequat", "duis", "aute", "irure", "in", "reprehenderit", "voluptate",
-        "velit", "esse", "cillum", "fugiat", "nulla", "pariatur", "excepteur", "sint",
-        "occaecat", "cupidatat", "non", "proident", "sunt", "culpa", "qui", "officia",
-        "deserunt", "mollit", "anim", "id", "est", "laborum",
-    ];
-
-    let mut rng = rand::thread_rng();
-    // Random word count between 3 and 15
-    let word_count = rng.gen_range(3..=15);
-
-    let line_words: Vec<&str> = (0..word_count)
-        .map(|_| WORDS[rng.gen_range(0..WORDS.len())])
-        .collect();
-
-    format!("{}. {}", line_num, line_words.join(" "))
-}
-
 /// Helper function to scroll up by a given amount
 fn scroll_up(state: &mut AIScreenState, amount: usize) {
     // 센티널 값(usize::MAX) 처리: 실제 max_scroll 값으로 정규화
@@ -1221,44 +957,6 @@ fn scroll_down(state: &mut AIScreenState, amount: usize) {
 pub fn handle_input(state: &mut AIScreenState, code: KeyCode, modifiers: KeyModifiers) -> bool {
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     let shift = modifiers.contains(KeyModifiers::SHIFT);
-
-    // Handle debug input mode (waiting for number of dummy lines)
-    if state.debug_input_mode {
-        match code {
-            KeyCode::Esc => {
-                // Cancel debug mode
-                state.debug_input_mode = false;
-                state.debug_input_buffer.clear();
-            }
-            KeyCode::Enter => {
-                // Add dummy lines as a single message with random lorem ipsum
-                if let Ok(count) = state.debug_input_buffer.parse::<usize>() {
-                    let dummy_content: String = (1..=count)
-                        .map(generate_lorem_line)
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    state.add_to_history(HistoryItem {
-                        item_type: HistoryType::System,
-                        content: dummy_content,
-                    });
-                    // Scroll to bottom after adding
-                    if state.auto_scroll {
-                        state.scroll_offset = usize::MAX;
-                    }
-                }
-                state.debug_input_mode = false;
-                state.debug_input_buffer.clear();
-            }
-            KeyCode::Backspace => {
-                state.debug_input_buffer.pop();
-            }
-            KeyCode::Char(c) if c.is_ascii_digit() => {
-                state.debug_input_buffer.push(c);
-            }
-            _ => {}
-        }
-        return false;
-    }
 
     match code {
         KeyCode::Esc => {
