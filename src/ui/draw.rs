@@ -134,7 +134,7 @@ fn draw_dual_panel(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) 
 
     // Dialog overlay
     if let Some(ref dialog) = app.dialog {
-        dialogs::draw_dialog(frame, dialog, area, theme);
+        dialogs::draw_dialog(frame, app, dialog, area, theme);
     }
 }
 

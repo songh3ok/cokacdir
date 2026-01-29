@@ -1,9 +1,13 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
+use std::thread;
 use chrono::{DateTime, Local};
 
-use crate::services::file_ops;
+use crate::services::file_ops::{self, FileOperationType, ProgressMessage, FileOperationResult};
 use crate::ui::file_viewer::ViewerState;
 use crate::ui::file_editor::EditorState;
 use crate::ui::file_info::FileInfoState;
@@ -86,6 +90,7 @@ pub enum DialogType {
     Goto,
     LargeImageConfirm,
     TrueColorWarning,
+    Progress,
 }
 
 /// Clipboard operation type for Ctrl+C/X/V operations
@@ -101,6 +106,118 @@ pub struct Clipboard {
     pub files: Vec<String>,
     pub source_path: PathBuf,
     pub operation: ClipboardOperation,
+}
+
+/// File operation progress state for progress dialog
+pub struct FileOperationProgress {
+    pub operation_type: FileOperationType,
+    pub is_active: bool,
+    pub cancel_flag: Arc<AtomicBool>,
+    receiver: Option<Receiver<ProgressMessage>>,
+
+    // Progress state
+    pub current_file: String,
+    pub current_file_progress: f64,  // 0.0 ~ 1.0
+    pub total_files: usize,
+    pub completed_files: usize,
+    pub total_bytes: u64,
+    pub completed_bytes: u64,
+
+    pub result: Option<FileOperationResult>,
+}
+
+impl FileOperationProgress {
+    pub fn new(operation_type: FileOperationType) -> Self {
+        Self {
+            operation_type,
+            is_active: false,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+            receiver: None,
+            current_file: String::new(),
+            current_file_progress: 0.0,
+            total_files: 0,
+            completed_files: 0,
+            total_bytes: 0,
+            completed_bytes: 0,
+            result: None,
+        }
+    }
+
+    /// Cancel the ongoing operation
+    pub fn cancel(&mut self) {
+        self.cancel_flag.store(true, Ordering::Relaxed);
+    }
+
+    /// Poll for progress messages. Returns true if still active.
+    pub fn poll(&mut self) -> bool {
+        if !self.is_active {
+            return false;
+        }
+
+        if let Some(ref receiver) = self.receiver {
+            // Process all available messages
+            loop {
+                match receiver.try_recv() {
+                    Ok(msg) => {
+                        match msg {
+                            ProgressMessage::FileStarted(name) => {
+                                self.current_file = name;
+                                self.current_file_progress = 0.0;
+                            }
+                            ProgressMessage::FileProgress(copied, total) => {
+                                if total > 0 {
+                                    self.current_file_progress = copied as f64 / total as f64;
+                                }
+                            }
+                            ProgressMessage::FileCompleted(_) => {
+                                self.current_file_progress = 1.0;
+                            }
+                            ProgressMessage::TotalProgress(completed_files, total_files, completed_bytes, total_bytes) => {
+                                self.completed_files = completed_files;
+                                self.total_files = total_files;
+                                self.completed_bytes = completed_bytes;
+                                self.total_bytes = total_bytes;
+                            }
+                            ProgressMessage::Completed(success, failure) => {
+                                self.result = Some(FileOperationResult {
+                                    success_count: success,
+                                    failure_count: failure,
+                                    last_error: None,
+                                });
+                                self.is_active = false;
+                                return false;
+                            }
+                            ProgressMessage::Error(_, err) => {
+                                if let Some(ref mut result) = self.result {
+                                    result.last_error = Some(err);
+                                }
+                            }
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.is_active = false;
+                        return false;
+                    }
+                }
+            }
+        }
+
+        self.is_active
+    }
+
+    /// Get overall progress as percentage (0.0 ~ 1.0)
+    pub fn overall_progress(&self) -> f64 {
+        if self.total_bytes > 0 {
+            self.completed_bytes as f64 / self.total_bytes as f64
+        } else if self.total_files > 0 {
+            self.completed_files as f64 / self.total_files as f64
+        } else {
+            0.0
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -349,6 +466,9 @@ pub struct App {
 
     // Clipboard state for Ctrl+C/X/V operations
     pub clipboard: Option<Clipboard>,
+
+    // File operation progress state
+    pub file_operation_progress: Option<FileOperationProgress>,
 }
 
 impl App {
@@ -402,6 +522,7 @@ impl App {
             search_result_state: crate::ui::search_result::SearchResultState::default(),
             previous_screen: None,
             clipboard: None,
+            file_operation_progress: None,
         }
     }
 
@@ -928,6 +1049,51 @@ impl App {
         self.refresh_panels();
     }
 
+    /// Execute copy with progress dialog
+    pub fn execute_copy_to_with_progress(&mut self, target_path: &Path) {
+        let files = self.get_operation_files();
+        if files.is_empty() {
+            self.show_message("No files selected");
+            return;
+        }
+
+        let source_path = self.active_panel().path.clone();
+        let target_path = target_path.to_path_buf();
+
+        // Create progress state
+        let mut progress = FileOperationProgress::new(FileOperationType::Copy);
+        progress.is_active = true;
+        let cancel_flag = progress.cancel_flag.clone();
+
+        // Create channel for progress messages
+        let (tx, rx) = mpsc::channel();
+        progress.receiver = Some(rx);
+
+        // Convert files to PathBuf
+        let file_paths: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
+
+        // Start copy in background thread
+        thread::spawn(move || {
+            file_ops::copy_files_with_progress(
+                file_paths,
+                &source_path,
+                &target_path,
+                cancel_flag,
+                tx,
+            );
+        });
+
+        // Store progress state and show dialog
+        self.file_operation_progress = Some(progress);
+        self.dialog = Some(Dialog {
+            dialog_type: DialogType::Progress,
+            input: String::new(),
+            message: String::new(),
+            completion: None,
+            selected_button: 0,
+        });
+    }
+
     #[allow(dead_code)]
     pub fn execute_move(&mut self) {
         let target_path = self.target_panel().path.clone();
@@ -956,6 +1122,51 @@ impl App {
             self.show_message(&format!("Moved {}/{}. Error: {}", success_count, files.len(), last_error));
         }
         self.refresh_panels();
+    }
+
+    /// Execute move with progress dialog
+    pub fn execute_move_to_with_progress(&mut self, target_path: &Path) {
+        let files = self.get_operation_files();
+        if files.is_empty() {
+            self.show_message("No files selected");
+            return;
+        }
+
+        let source_path = self.active_panel().path.clone();
+        let target_path = target_path.to_path_buf();
+
+        // Create progress state
+        let mut progress = FileOperationProgress::new(FileOperationType::Move);
+        progress.is_active = true;
+        let cancel_flag = progress.cancel_flag.clone();
+
+        // Create channel for progress messages
+        let (tx, rx) = mpsc::channel();
+        progress.receiver = Some(rx);
+
+        // Convert files to PathBuf
+        let file_paths: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
+
+        // Start move in background thread
+        thread::spawn(move || {
+            file_ops::move_files_with_progress(
+                file_paths,
+                &source_path,
+                &target_path,
+                cancel_flag,
+                tx,
+            );
+        });
+
+        // Store progress state and show dialog
+        self.file_operation_progress = Some(progress);
+        self.dialog = Some(Dialog {
+            dialog_type: DialogType::Progress,
+            input: String::new(),
+            message: String::new(),
+            completion: None,
+            selected_button: 0,
+        });
     }
 
     pub fn execute_delete(&mut self) {
@@ -1060,54 +1271,88 @@ impl App {
             return;
         }
 
-        let mut success_count = 0;
-        let mut last_error = String::new();
-        let total = clipboard.files.len();
-
         // Get canonical target path for cycle detection
         let canonical_target = target_path.canonicalize().ok();
 
+        // Filter out files that would cause cycle
+        let mut valid_files: Vec<String> = Vec::new();
         for file_name in &clipboard.files {
             let src = clipboard.source_path.join(file_name);
-            let dest = target_path.join(file_name);
 
             // Check for copying/moving directory into itself
             if let (Some(ref target_canon), Ok(src_canon)) = (&canonical_target, src.canonicalize()) {
                 if src.is_dir() && target_canon.starts_with(&src_canon) {
-                    last_error = format!("Cannot copy '{}' into itself", file_name);
+                    self.show_message(&format!("Cannot copy '{}' into itself", file_name));
                     continue;
                 }
             }
-
-            let result = match clipboard.operation {
-                ClipboardOperation::Copy => file_ops::copy_file(&src, &dest),
-                ClipboardOperation::Cut => file_ops::move_file(&src, &dest),
-            };
-
-            match result {
-                Ok(_) => success_count += 1,
-                Err(e) => last_error = e.to_string(),
-            }
+            valid_files.push(file_name.clone());
         }
 
-        let op_name = match clipboard.operation {
-            ClipboardOperation::Copy => "Copied",
-            ClipboardOperation::Cut => "Moved",
+        if valid_files.is_empty() {
+            self.clipboard = Some(clipboard);
+            return;
+        }
+
+        // Determine operation type for progress
+        let operation_type = match clipboard.operation {
+            ClipboardOperation::Copy => FileOperationType::Copy,
+            ClipboardOperation::Cut => FileOperationType::Move,
         };
 
-        if success_count == total {
-            self.show_message(&format!("{} {} file(s)", op_name, success_count));
-        } else {
-            self.show_message(&format!("{} {}/{}. Error: {}", op_name, success_count, total, last_error));
-        }
+        // Create progress state
+        let mut progress = FileOperationProgress::new(operation_type);
+        progress.is_active = true;
+        let cancel_flag = progress.cancel_flag.clone();
+
+        // Create channel for progress messages
+        let (tx, rx) = mpsc::channel();
+        progress.receiver = Some(rx);
+
+        // Convert files to PathBuf
+        let file_paths: Vec<PathBuf> = valid_files.iter().map(PathBuf::from).collect();
+        let source_path = clipboard.source_path.clone();
+
+        // Start operation in background thread
+        let clipboard_operation = clipboard.operation;
+        thread::spawn(move || {
+            match clipboard_operation {
+                ClipboardOperation::Copy => {
+                    file_ops::copy_files_with_progress(
+                        file_paths,
+                        &source_path,
+                        &target_path,
+                        cancel_flag,
+                        tx,
+                    );
+                }
+                ClipboardOperation::Cut => {
+                    file_ops::move_files_with_progress(
+                        file_paths,
+                        &source_path,
+                        &target_path,
+                        cancel_flag,
+                        tx,
+                    );
+                }
+            }
+        });
+
+        // Store progress state and show dialog
+        self.file_operation_progress = Some(progress);
+        self.dialog = Some(Dialog {
+            dialog_type: DialogType::Progress,
+            input: String::new(),
+            message: String::new(),
+            completion: None,
+            selected_button: 0,
+        });
 
         // Keep clipboard for copy operations (can paste multiple times)
         // Clear clipboard for cut operations (files are moved)
         if clipboard.operation == ClipboardOperation::Copy {
             self.clipboard = Some(clipboard);
         }
-
-        self.refresh_panels();
     }
 
     /// Check if clipboard has content
@@ -1750,6 +1995,14 @@ mod tests {
         // Paste
         app.clipboard_paste();
 
+        // Wait for async operation to complete
+        while app.file_operation_progress.as_ref().map(|p| p.is_active).unwrap_or(false) {
+            if let Some(ref mut progress) = app.file_operation_progress {
+                progress.poll();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
         // File should exist in both locations
         assert!(src_dir.join("file.txt").exists());
         assert!(dest_dir.join("file.txt").exists());
@@ -1784,6 +2037,14 @@ mod tests {
 
         // Paste
         app.clipboard_paste();
+
+        // Wait for async operation to complete
+        while app.file_operation_progress.as_ref().map(|p| p.is_active).unwrap_or(false) {
+            if let Some(ref mut progress) = app.file_operation_progress {
+                progress.poll();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         // File should only exist in destination
         assert!(!src_dir.join("file.txt").exists());

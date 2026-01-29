@@ -10,6 +10,8 @@ use ratatui::{
     Frame,
 };
 
+use crate::services::file_ops::FileOperationType;
+
 use super::{
     app::{App, Dialog, DialogType, PathCompletion},
     theme::Theme,
@@ -201,7 +203,7 @@ fn apply_completion(dialog: &mut Dialog, base_dir: &Path, suggestion: &str) {
     dialog.input = path_str;
 }
 
-pub fn draw_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, theme: &Theme) {
+pub fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, theme: &Theme) {
     // 자동완성 목록이 표시될 경우 높이 동적 조정
     let completion_height = if let Some(ref completion) = dialog.completion {
         if completion.visible && !completion.suggestions.is_empty() {
@@ -226,6 +228,7 @@ pub fn draw_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, theme: &Theme
             (w, 6 + completion_height)
         }
         DialogType::Search | DialogType::Mkdir | DialogType::Rename => (50u16, 5u16),  // 간결한 입력창
+        DialogType::Progress => (50u16, 10u16),  // Progress dialog
     };
 
     let x = area.x + (area.width.saturating_sub(width)) / 2;
@@ -253,6 +256,9 @@ pub fn draw_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, theme: &Theme
         }
         DialogType::Search | DialogType::Mkdir | DialogType::Rename => {
             draw_simple_input_dialog(frame, dialog, dialog_area, theme);
+        }
+        DialogType::Progress => {
+            draw_progress_dialog(frame, app, dialog_area, theme);
         }
     }
 }
@@ -680,6 +686,119 @@ fn draw_goto_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, theme: &Them
     frame.render_widget(Paragraph::new(help_line), help_area);
 }
 
+/// Progress dialog for file operations
+fn draw_progress_dialog(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
+    let progress = match &app.file_operation_progress {
+        Some(p) => p,
+        None => return,
+    };
+
+    let title = match progress.operation_type {
+        FileOperationType::Copy => " Copying ",
+        FileOperationType::Move => " Moving ",
+    };
+
+    let block = Block::default()
+        .title(title)
+        .title_style(theme.header_style())
+        .borders(Borders::ALL)
+        .border_style(theme.border_style(true));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Current file name (truncated if needed)
+    let max_filename_len = (inner.width - 8) as usize;
+    let current_file = if progress.current_file.len() > max_filename_len {
+        format!("...{}", &progress.current_file[progress.current_file.len().saturating_sub(max_filename_len - 3)..])
+    } else {
+        progress.current_file.clone()
+    };
+
+    let file_line = Line::from(vec![
+        Span::styled("File: ", theme.dim_style()),
+        Span::styled(current_file, theme.normal_style()),
+    ]);
+    let file_area = Rect::new(inner.x + 1, inner.y, inner.width - 2, 1);
+    frame.render_widget(Paragraph::new(file_line), file_area);
+
+    // Current file progress bar
+    let bar_width = (inner.width - 8) as usize;
+    let file_progress_percent = (progress.current_file_progress * 100.0) as u8;
+    let file_filled = (progress.current_file_progress * bar_width as f64) as usize;
+    let file_empty = bar_width.saturating_sub(file_filled);
+    let file_bar = format!(
+        "{}{}",
+        "█".repeat(file_filled),
+        "░".repeat(file_empty)
+    );
+
+    let file_bar_line = Line::from(vec![
+        Span::styled(file_bar, theme.info_style()),
+        Span::styled(format!(" {:3}%", file_progress_percent), theme.normal_style()),
+    ]);
+    let file_bar_area = Rect::new(inner.x + 1, inner.y + 1, inner.width - 2, 1);
+    frame.render_widget(Paragraph::new(file_bar_line), file_bar_area);
+
+    // Total progress info
+    let total_info = format!(
+        "{}/{} files ({}/{})",
+        progress.completed_files,
+        progress.total_files,
+        format_size(progress.completed_bytes),
+        format_size(progress.total_bytes),
+    );
+    let total_line = Line::from(Span::styled(total_info, theme.dim_style()));
+    let total_area = Rect::new(inner.x + 1, inner.y + 3, inner.width - 2, 1);
+    frame.render_widget(Paragraph::new(total_line), total_area);
+
+    // Total progress bar
+    let total_progress = progress.overall_progress();
+    let total_progress_percent = (total_progress * 100.0) as u8;
+    let total_filled = (total_progress * bar_width as f64) as usize;
+    let total_empty = bar_width.saturating_sub(total_filled);
+    let total_bar = format!(
+        "{}{}",
+        "█".repeat(total_filled),
+        "░".repeat(total_empty)
+    );
+
+    let total_bar_line = Line::from(vec![
+        Span::styled(total_bar, theme.info_style()),
+        Span::styled(format!(" {:3}%", total_progress_percent), theme.normal_style()),
+    ]);
+    let total_bar_area = Rect::new(inner.x + 1, inner.y + 4, inner.width - 2, 1);
+    frame.render_widget(Paragraph::new(total_bar_line), total_bar_area);
+
+    // Help text
+    let help_line = Line::from(Span::styled(
+        "Press ESC to cancel",
+        theme.dim_style(),
+    ));
+    let help_area = Rect::new(inner.x + 1, inner.y + inner.height - 2, inner.width - 2, 1);
+    frame.render_widget(
+        Paragraph::new(help_line).alignment(ratatui::layout::Alignment::Center),
+        help_area,
+    );
+}
+
+/// Format file size for display
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    const GB: u64 = 1024 * 1024 * 1024;
+
+    if bytes >= GB {
+        format!("{:.1}GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1}MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1}KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{}B", bytes)
+    }
+}
+
 /// 자동완성 목록 렌더링
 fn draw_completion_list(
     frame: &mut Frame,
@@ -815,6 +934,9 @@ pub fn handle_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers
             }
             DialogType::Goto => {
                 return handle_goto_dialog_input(app, code, modifiers);
+            }
+            DialogType::Progress => {
+                return handle_progress_dialog_input(app, code);
             }
             _ => {
                 match code {
@@ -1084,14 +1206,14 @@ fn handle_copy_move_dialog_input(app: &mut App, code: KeyCode, _modifiers: KeyMo
                     return false;
                 }
 
-                // 복사/이동 실행
+                // 복사/이동 실행 (프로그레스바 버전)
                 let dialog_type = dialog.dialog_type;
                 let target_path = path;
                 app.dialog = None;
 
                 match dialog_type {
-                    DialogType::Copy => app.execute_copy_to(&target_path),
-                    DialogType::Move => app.execute_move_to(&target_path),
+                    DialogType::Copy => app.execute_copy_to_with_progress(&target_path),
+                    DialogType::Move => app.execute_move_to_with_progress(&target_path),
                     _ => {}
                 }
                 return false;
@@ -1134,6 +1256,18 @@ fn handle_copy_move_dialog_input(app: &mut App, code: KeyCode, _modifiers: KeyMo
             }
             _ => {}
         }
+    }
+    false
+}
+
+/// Handle progress dialog input (ESC to cancel)
+fn handle_progress_dialog_input(app: &mut App, code: KeyCode) -> bool {
+    if code == KeyCode::Esc {
+        // Cancel the operation
+        if let Some(ref mut progress) = app.file_operation_progress {
+            progress.cancel();
+        }
+        // Dialog will be closed when the operation completes (or is cancelled)
     }
     false
 }

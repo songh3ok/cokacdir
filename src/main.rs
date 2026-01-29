@@ -190,14 +190,18 @@ fn run_app<B: ratatui::backend::Backend>(
     loop {
         terminal.draw(|f| ui::draw::draw(f, app))?;
 
-        // For AI screen, FileInfo with calculation, or ImageViewer loading, use fast polling for spinner animation
+        // For AI screen, FileInfo with calculation, ImageViewer loading, or file operation progress, use fast polling
         let is_file_info_calculating = app.current_screen == Screen::FileInfo
             && app.file_info_state.as_ref().map(|s| s.is_calculating).unwrap_or(false);
         let is_image_loading = app.current_screen == Screen::ImageViewer
             && app.image_viewer_state.as_ref().map(|s| s.is_loading).unwrap_or(false);
+        let is_progress_active = app.file_operation_progress
+            .as_ref()
+            .map(|p| p.is_active)
+            .unwrap_or(false);
 
-        let poll_timeout = if app.current_screen == Screen::AIScreen || is_file_info_calculating || is_image_loading {
-            Duration::from_millis(100) // Fast polling for spinner animation
+        let poll_timeout = if app.current_screen == Screen::AIScreen || is_file_info_calculating || is_image_loading || is_progress_active {
+            Duration::from_millis(100) // Fast polling for spinner animation / progress updates
         } else {
             Duration::from_millis(250)
         };
@@ -221,6 +225,48 @@ fn run_app<B: ratatui::backend::Backend>(
             if let Some(ref mut state) = app.image_viewer_state {
                 state.poll();
             }
+        }
+
+        // Poll for file operation progress
+        let progress_message: Option<String> = if let Some(ref mut progress) = app.file_operation_progress {
+            let still_active = progress.poll();
+            if !still_active {
+                // Operation completed - extract result info before releasing borrow
+                let msg = if let Some(ref result) = progress.result {
+                    let op_name = match progress.operation_type {
+                        crate::services::file_ops::FileOperationType::Copy => "Copied",
+                        crate::services::file_ops::FileOperationType::Move => "Moved",
+                    };
+                    let total = result.success_count + result.failure_count;
+                    if result.failure_count == 0 {
+                        Some(format!("{} {} file(s)", op_name, result.success_count))
+                    } else {
+                        Some(format!("{} {}/{}. Error: {}",
+                            op_name,
+                            result.success_count,
+                            total,
+                            result.last_error.as_deref().unwrap_or("Unknown error")
+                        ))
+                    }
+                } else {
+                    None
+                };
+                msg
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Handle progress completion (outside of borrow)
+        if progress_message.is_some() {
+            if let Some(msg) = progress_message {
+                app.show_message(&msg);
+            }
+            app.file_operation_progress = None;
+            app.dialog = None;
+            app.refresh_panels();
         }
 
         // Check for key events with timeout

@@ -1,7 +1,538 @@
 use std::collections::HashSet;
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
+use std::sync::Arc;
+
+/// File operation type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileOperationType {
+    Copy,
+    Move,
+}
+
+/// Progress message for file operations
+#[derive(Debug, Clone)]
+pub enum ProgressMessage {
+    /// File operation started (filename)
+    FileStarted(String),
+    /// File progress (copied bytes, total bytes)
+    FileProgress(u64, u64),
+    /// File completed (filename)
+    FileCompleted(String),
+    /// Total progress (completed files, total files, completed bytes, total bytes)
+    TotalProgress(usize, usize, u64, u64),
+    /// Operation completed (success count, failure count)
+    Completed(usize, usize),
+    /// Error occurred (filename, error message)
+    Error(String, String),
+}
+
+/// File operation result
+#[derive(Debug, Clone)]
+pub struct FileOperationResult {
+    pub success_count: usize,
+    pub failure_count: usize,
+    pub last_error: Option<String>,
+}
+
+/// Buffer size for file copy (64KB)
+const COPY_BUFFER_SIZE: usize = 64 * 1024;
+
+/// Calculate total size of files to be copied/moved
+pub fn calculate_total_size(files: &[PathBuf], cancel_flag: &Arc<AtomicBool>) -> io::Result<(u64, usize)> {
+    let mut total_size: u64 = 0;
+    let mut total_files: usize = 0;
+
+    for path in files {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "Cancelled"));
+        }
+
+        if path.is_dir() {
+            let (dir_size, dir_files) = calculate_dir_size(path, cancel_flag)?;
+            total_size += dir_size;
+            total_files += dir_files;
+        } else if path.is_file() {
+            total_size += fs::metadata(path)?.len();
+            total_files += 1;
+        }
+    }
+
+    Ok((total_size, total_files))
+}
+
+/// Calculate total size and file count of a directory
+fn calculate_dir_size(path: &Path, cancel_flag: &Arc<AtomicBool>) -> io::Result<(u64, usize)> {
+    let mut total_size: u64 = 0;
+    let mut total_files: usize = 0;
+
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            if cancel_flag.load(Ordering::Relaxed) {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "Cancelled"));
+            }
+
+            let entry_path = entry.path();
+            let metadata = fs::symlink_metadata(&entry_path)?;
+
+            if metadata.is_symlink() {
+                // Symlinks count as 0 size
+                total_files += 1;
+            } else if metadata.is_dir() {
+                let (sub_size, sub_files) = calculate_dir_size(&entry_path, cancel_flag)?;
+                total_size += sub_size;
+                total_files += sub_files;
+            } else {
+                total_size += metadata.len();
+                total_files += 1;
+            }
+        }
+    }
+
+    Ok((total_size, total_files))
+}
+
+/// Copy a single file with progress callback
+pub fn copy_file_with_progress<F>(
+    src: &Path,
+    dest: &Path,
+    cancel_flag: &Arc<AtomicBool>,
+    mut progress_callback: F,
+) -> io::Result<u64>
+where
+    F: FnMut(u64, u64),
+{
+    let metadata = fs::metadata(src)?;
+    let total_size = metadata.len();
+
+    // Open source and destination files
+    let mut src_file = File::open(src)?;
+    let mut dest_file = File::create(dest)?;
+
+    let mut buffer = vec![0u8; COPY_BUFFER_SIZE];
+    let mut copied: u64 = 0;
+
+    loop {
+        // Check for cancellation
+        if cancel_flag.load(Ordering::Relaxed) {
+            // Clean up incomplete file
+            drop(dest_file);
+            let _ = fs::remove_file(dest);
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "Cancelled"));
+        }
+
+        let bytes_read = src_file.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        dest_file.write_all(&buffer[..bytes_read])?;
+        copied += bytes_read as u64;
+
+        // Report progress
+        progress_callback(copied, total_size);
+    }
+
+    // Preserve permissions
+    #[cfg(unix)]
+    {
+        fs::set_permissions(dest, metadata.permissions())?;
+    }
+
+    Ok(copied)
+}
+
+/// Copy directory recursively with progress reporting
+pub fn copy_dir_recursive_with_progress(
+    src: &Path,
+    dest: &Path,
+    cancel_flag: &Arc<AtomicBool>,
+    progress_tx: &Sender<ProgressMessage>,
+    completed_bytes: &mut u64,
+    completed_files: &mut usize,
+    total_bytes: u64,
+    total_files: usize,
+) -> io::Result<()> {
+    // Check for cancellation
+    if cancel_flag.load(Ordering::Relaxed) {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "Cancelled"));
+    }
+
+    fs::create_dir_all(dest)?;
+
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+
+        // Check for cancellation
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "Cancelled"));
+        }
+
+        let metadata = fs::symlink_metadata(&src_path)?;
+
+        if metadata.is_symlink() {
+            // Copy symlink
+            #[cfg(unix)]
+            {
+                let link_target = fs::read_link(&src_path)?;
+
+                // Security: Validate symlink target
+                if link_target.is_absolute() {
+                    let target_str = link_target.to_string_lossy();
+                    let sensitive_paths = ["/etc", "/sys", "/proc", "/boot", "/root", "/var/log"];
+                    for sensitive in sensitive_paths {
+                        if target_str.starts_with(sensitive) {
+                            return Err(io::Error::new(
+                                io::ErrorKind::PermissionDenied,
+                                format!("Cannot copy symlink pointing to sensitive path: {}", target_str),
+                            ));
+                        }
+                    }
+                }
+
+                std::os::unix::fs::symlink(&link_target, &dest_path)?;
+            }
+            #[cfg(not(unix))]
+            {
+                if src_path.is_file() {
+                    fs::copy(&src_path, &dest_path)?;
+                }
+            }
+
+            *completed_files += 1;
+            let _ = progress_tx.send(ProgressMessage::TotalProgress(
+                *completed_files,
+                total_files,
+                *completed_bytes,
+                total_bytes,
+            ));
+        } else if metadata.is_dir() {
+            copy_dir_recursive_with_progress(
+                &src_path,
+                &dest_path,
+                cancel_flag,
+                progress_tx,
+                completed_bytes,
+                completed_files,
+                total_bytes,
+                total_files,
+            )?;
+        } else {
+            // Regular file - copy with progress
+            let filename = src_path.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            let _ = progress_tx.send(ProgressMessage::FileStarted(filename.clone()));
+
+            let file_size = metadata.len();
+            let file_completed_bytes = *completed_bytes;
+
+            let result = copy_file_with_progress(
+                &src_path,
+                &dest_path,
+                cancel_flag,
+                |copied, total| {
+                    let _ = progress_tx.send(ProgressMessage::FileProgress(copied, total));
+                    let _ = progress_tx.send(ProgressMessage::TotalProgress(
+                        *completed_files,
+                        total_files,
+                        file_completed_bytes + copied,
+                        total_bytes,
+                    ));
+                },
+            );
+
+            match result {
+                Ok(_) => {
+                    *completed_bytes += file_size;
+                    *completed_files += 1;
+                    let _ = progress_tx.send(ProgressMessage::FileCompleted(filename));
+                }
+                Err(e) => {
+                    if e.kind() == io::ErrorKind::Interrupted {
+                        return Err(e);
+                    }
+                    let _ = progress_tx.send(ProgressMessage::Error(filename, e.to_string()));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Copy files with progress reporting (main entry point for progress-enabled copy)
+pub fn copy_files_with_progress(
+    files: Vec<PathBuf>,
+    source_dir: &Path,
+    target_dir: &Path,
+    cancel_flag: Arc<AtomicBool>,
+    progress_tx: Sender<ProgressMessage>,
+) {
+    let mut success_count = 0;
+    let mut failure_count = 0;
+
+    // Calculate total size
+    let (total_bytes, total_files) = match calculate_total_size(&files, &cancel_flag) {
+        Ok((size, count)) => (size, count),
+        Err(e) => {
+            let _ = progress_tx.send(ProgressMessage::Error("".to_string(), e.to_string()));
+            let _ = progress_tx.send(ProgressMessage::Completed(0, files.len()));
+            return;
+        }
+    };
+
+    let mut completed_bytes: u64 = 0;
+    let mut completed_files: usize = 0;
+
+    for file_path in &files {
+        if cancel_flag.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let src = if file_path.is_absolute() {
+            file_path.clone()
+        } else {
+            source_dir.join(file_path)
+        };
+
+        let filename = src.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let dest = target_dir.join(&filename);
+
+        // Check if destination already exists
+        if dest.exists() {
+            failure_count += 1;
+            let _ = progress_tx.send(ProgressMessage::Error(
+                filename,
+                "Target already exists".to_string(),
+            ));
+            continue;
+        }
+
+        let _ = progress_tx.send(ProgressMessage::FileStarted(filename.clone()));
+
+        if src.is_dir() {
+            match copy_dir_recursive_with_progress(
+                &src,
+                &dest,
+                &cancel_flag,
+                &progress_tx,
+                &mut completed_bytes,
+                &mut completed_files,
+                total_bytes,
+                total_files,
+            ) {
+                Ok(_) => {
+                    success_count += 1;
+                    let _ = progress_tx.send(ProgressMessage::FileCompleted(filename));
+                }
+                Err(e) => {
+                    if e.kind() == io::ErrorKind::Interrupted {
+                        // Cancelled - clean up partial copy
+                        let _ = fs::remove_dir_all(&dest);
+                        break;
+                    }
+                    failure_count += 1;
+                    let _ = progress_tx.send(ProgressMessage::Error(filename, e.to_string()));
+                }
+            }
+        } else {
+            let file_size = fs::metadata(&src).map(|m| m.len()).unwrap_or(0);
+            let file_completed_bytes = completed_bytes;
+
+            match copy_file_with_progress(
+                &src,
+                &dest,
+                &cancel_flag,
+                |copied, total| {
+                    let _ = progress_tx.send(ProgressMessage::FileProgress(copied, total));
+                    let _ = progress_tx.send(ProgressMessage::TotalProgress(
+                        completed_files,
+                        total_files,
+                        file_completed_bytes + copied,
+                        total_bytes,
+                    ));
+                },
+            ) {
+                Ok(_) => {
+                    completed_bytes += file_size;
+                    completed_files += 1;
+                    success_count += 1;
+                    let _ = progress_tx.send(ProgressMessage::FileCompleted(filename));
+                }
+                Err(e) => {
+                    if e.kind() == io::ErrorKind::Interrupted {
+                        break;
+                    }
+                    failure_count += 1;
+                    let _ = progress_tx.send(ProgressMessage::Error(filename, e.to_string()));
+                }
+            }
+        }
+    }
+
+    let _ = progress_tx.send(ProgressMessage::Completed(success_count, failure_count));
+}
+
+/// Move files with progress reporting
+pub fn move_files_with_progress(
+    files: Vec<PathBuf>,
+    source_dir: &Path,
+    target_dir: &Path,
+    cancel_flag: Arc<AtomicBool>,
+    progress_tx: Sender<ProgressMessage>,
+) {
+    let mut success_count = 0;
+    let mut failure_count = 0;
+
+    // First, try simple rename for each file (fast path for same filesystem)
+    let mut needs_copy: Vec<(PathBuf, PathBuf)> = Vec::new();
+
+    for file_path in &files {
+        if cancel_flag.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let src = if file_path.is_absolute() {
+            file_path.clone()
+        } else {
+            source_dir.join(file_path)
+        };
+
+        let filename = src.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let dest = target_dir.join(&filename);
+
+        // Check if destination already exists
+        if dest.exists() {
+            failure_count += 1;
+            let _ = progress_tx.send(ProgressMessage::Error(
+                filename,
+                "Target already exists".to_string(),
+            ));
+            continue;
+        }
+
+        let _ = progress_tx.send(ProgressMessage::FileStarted(filename.clone()));
+
+        // Try rename first
+        match fs::rename(&src, &dest) {
+            Ok(_) => {
+                success_count += 1;
+                let _ = progress_tx.send(ProgressMessage::FileCompleted(filename));
+            }
+            Err(e) => {
+                // If cross-device, we need to copy+delete
+                if e.raw_os_error() == Some(libc::EXDEV) {
+                    needs_copy.push((src, dest));
+                } else {
+                    failure_count += 1;
+                    let _ = progress_tx.send(ProgressMessage::Error(filename, e.to_string()));
+                }
+            }
+        }
+    }
+
+    // Handle cross-device moves (copy + delete)
+    if !needs_copy.is_empty() && !cancel_flag.load(Ordering::Relaxed) {
+        // Calculate total size for cross-device copies
+        let copy_paths: Vec<PathBuf> = needs_copy.iter().map(|(src, _)| src.clone()).collect();
+        let (total_bytes, total_files) = match calculate_total_size(&copy_paths, &cancel_flag) {
+            Ok((size, count)) => (size, count),
+            Err(_) => (0, needs_copy.len()),
+        };
+
+        let mut completed_bytes: u64 = 0;
+        let mut completed_files: usize = 0;
+
+        for (src, dest) in needs_copy {
+            if cancel_flag.load(Ordering::Relaxed) {
+                break;
+            }
+
+            let filename = src.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            let _ = progress_tx.send(ProgressMessage::FileStarted(filename.clone()));
+
+            let copy_result = if src.is_dir() {
+                copy_dir_recursive_with_progress(
+                    &src,
+                    &dest,
+                    &cancel_flag,
+                    &progress_tx,
+                    &mut completed_bytes,
+                    &mut completed_files,
+                    total_bytes,
+                    total_files,
+                )
+            } else {
+                let file_size = fs::metadata(&src).map(|m| m.len()).unwrap_or(0);
+                let file_completed_bytes = completed_bytes;
+
+                copy_file_with_progress(
+                    &src,
+                    &dest,
+                    &cancel_flag,
+                    |copied, total| {
+                        let _ = progress_tx.send(ProgressMessage::FileProgress(copied, total));
+                        let _ = progress_tx.send(ProgressMessage::TotalProgress(
+                            completed_files,
+                            total_files,
+                            file_completed_bytes + copied,
+                            total_bytes,
+                        ));
+                    },
+                ).map(|_| {
+                    completed_bytes += file_size;
+                    completed_files += 1;
+                })
+            };
+
+            match copy_result {
+                Ok(_) => {
+                    // Delete source after successful copy
+                    if let Err(e) = delete_file(&src) {
+                        // Copy succeeded but delete failed - report but count as success
+                        let _ = progress_tx.send(ProgressMessage::Error(
+                            filename.clone(),
+                            format!("Copied but failed to delete source: {}", e),
+                        ));
+                    }
+                    success_count += 1;
+                    let _ = progress_tx.send(ProgressMessage::FileCompleted(filename));
+                }
+                Err(e) => {
+                    if e.kind() == io::ErrorKind::Interrupted {
+                        // Cancelled - clean up partial copy
+                        if dest.is_dir() {
+                            let _ = fs::remove_dir_all(&dest);
+                        } else {
+                            let _ = fs::remove_file(&dest);
+                        }
+                        break;
+                    }
+                    failure_count += 1;
+                    let _ = progress_tx.send(ProgressMessage::Error(filename, e.to_string()));
+                }
+            }
+        }
+    }
+
+    let _ = progress_tx.send(ProgressMessage::Completed(success_count, failure_count));
+}
 
 /// Copy a file or directory
 pub fn copy_file(src: &Path, dest: &Path) -> io::Result<()> {
