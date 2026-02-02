@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
-use super::{app::{App, Screen}, theme::Theme};
+use super::{app::{App, Dialog, DialogType, Screen}, theme::Theme};
 
 /// Result of async image loading
 struct ImageLoadResult {
@@ -299,7 +299,7 @@ fn get_spinner_frame() -> char {
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
-    // Draw dual panel in background
+    // Draw dual panel in background (항상 그림 - AI 모드 포함)
     super::draw::draw_dual_panel_background(frame, app, area, theme);
 
     let state = match &app.image_viewer_state {
@@ -307,17 +307,42 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         None => return,
     };
 
-    // Calculate viewer area (leave some margin)
-    let margin = 2;
-    let viewer_width = area.width.saturating_sub(margin * 2);
-    let viewer_height = area.height.saturating_sub(margin * 2);
+    // AI 모드에서는 파일 패널 영역에만 이미지 오버레이 표시
+    let overlay_area = if app.is_ai_mode() {
+        // 패널 영역 계산 (draw.rs의 draw_dual_panel과 동일한 레이아웃)
+        let chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Min(5),
+                ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Length(1),
+            ])
+            .split(area);
+        let panel_chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([ratatui::layout::Constraint::Percentage(50), ratatui::layout::Constraint::Percentage(50)])
+            .split(chunks[0]);
+        // AI가 있는 반대쪽이 파일 패널
+        match app.ai_panel_side {
+            Some(crate::ui::app::PanelSide::Left) => panel_chunks[1],
+            Some(crate::ui::app::PanelSide::Right) => panel_chunks[0],
+            None => area,
+        }
+    } else {
+        area
+    };
+
+    // Calculate viewer area (margin 없이 전체 영역 사용)
+    let margin = 0;
+    let viewer_width = overlay_area.width.saturating_sub(margin * 2);
+    let viewer_height = overlay_area.height.saturating_sub(margin * 2);
 
     if viewer_width < 20 || viewer_height < 10 {
         return;
     }
 
-    let x = area.x + margin;
-    let y = area.y + margin;
+    let x = overlay_area.x + margin;
+    let y = overlay_area.y + margin;
     let viewer_area = Rect::new(x, y, viewer_width, viewer_height);
 
     // Clear area
@@ -342,9 +367,10 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
 
     let block = Block::default()
         .title(title)
-        .title_style(Style::default().fg(theme.image_viewer.border))
+        .title_style(Style::default().fg(theme.image_viewer.title_text))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.image_viewer.border));
+        .border_style(Style::default().fg(theme.image_viewer.border))
+        .style(Style::default().bg(theme.image_viewer.bg));
 
     let inner = block.inner(viewer_area);
     frame.render_widget(block, viewer_area);
@@ -541,6 +567,37 @@ pub fn handle_input(app: &mut App, code: KeyCode) {
         // Navigate to next image
         KeyCode::PageDown => {
             state.navigate_next();
+        }
+        // Select current image and move to next
+        KeyCode::Char(' ') => {
+            // 현재 이미지 파일 이름 가져오기
+            let filename = state.path.file_name().map(|n| n.to_string_lossy().to_string());
+            // 다음 이미지로 이동 (state borrow 해제 전에 처리)
+            state.navigate_next();
+            // 활성 패널의 selected_files에 토글 (state borrow 해제 후)
+            if let Some(name) = filename {
+                let panel = app.active_panel_mut();
+                if panel.selected_files.contains(&name) {
+                    panel.selected_files.remove(&name);
+                } else {
+                    panel.selected_files.insert(name);
+                }
+            }
+        }
+        // Delete current image
+        KeyCode::Delete | KeyCode::Backspace => {
+            let filename = state.path.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "file".to_string());
+            app.dialog = Some(Dialog {
+                dialog_type: DialogType::Delete,
+                input: String::new(),
+                cursor_pos: 0,
+                message: format!("Delete {}?", filename),
+                completion: None,
+                selected_button: 1,  // 기본값: No (안전을 위해)
+                selection: None,
+            });
         }
         _ => {}
     }

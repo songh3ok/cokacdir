@@ -810,6 +810,8 @@ pub struct App {
 
     // AI screen state
     pub ai_state: Option<crate::ui::ai_screen::AIScreenState>,
+    pub ai_panel_side: Option<PanelSide>,  // AI가 표시될 패널 측면
+    pub ai_previous_panel: Option<PanelSide>,  // AI 화면 띄우기 전 포커스 위치
 
     // System info state
     pub system_info_state: crate::ui::system_info::SystemInfoState,
@@ -907,6 +909,8 @@ impl App {
             process_force_kill: false,
 
             ai_state: None,
+            ai_panel_side: None,
+            ai_previous_panel: None,
             system_info_state: crate::ui::system_info::SystemInfoState::default(),
             advanced_search_state: crate::ui::advanced_search::AdvancedSearchState::default(),
             image_viewer_state: None,
@@ -986,6 +990,8 @@ impl App {
             process_force_kill: false,
 
             ai_state: None,
+            ai_panel_side: None,
+            ai_previous_panel: None,
             system_info_state: crate::ui::system_info::SystemInfoState::default(),
             advanced_search_state: crate::ui::advanced_search::AdvancedSearchState::default(),
             image_viewer_state: None,
@@ -2097,27 +2103,43 @@ impl App {
     }
 
     pub fn show_ai_screen(&mut self) {
-        use std::process::Command;
-
-        // Check if claude command is available
-        let claude_available = Command::new("claude")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-
-        if !claude_available {
-            self.show_message("Claude CLI not found. Please install claude command.");
-            return;
-        }
-
         let current_path = self.active_panel().path.display().to_string();
         // Try to load the most recent session, fall back to new session
+        // Note: claude availability is checked inside AIScreenState (displays error in UI if unavailable)
         self.ai_state = Some(
             crate::ui::ai_screen::AIScreenState::load_latest_session(current_path.clone())
                 .unwrap_or_else(|| crate::ui::ai_screen::AIScreenState::new(current_path))
         );
-        self.current_screen = Screen::AIScreen;
+        // 원래 포커스 위치 저장
+        self.ai_previous_panel = Some(self.active_panel);
+        // AI 화면을 비활성 패널(포커스가 없는 쪽)에 표시
+        let ai_side = match self.active_panel {
+            PanelSide::Left => PanelSide::Right,
+            PanelSide::Right => PanelSide::Left,
+        };
+        self.ai_panel_side = Some(ai_side);
+        // 포커스를 AI 화면으로 이동
+        self.active_panel = ai_side;
+    }
+
+    /// AI 화면을 닫고 상태 초기화
+    pub fn close_ai_screen(&mut self) {
+        if let Some(ref mut state) = self.ai_state {
+            state.save_session_to_file();
+        }
+        // 원래 포커스 위치로 복원
+        if let Some(prev) = self.ai_previous_panel {
+            self.active_panel = prev;
+        }
+        self.ai_panel_side = None;
+        self.ai_previous_panel = None;
+        self.ai_state = None;
+        self.refresh_panels();
+    }
+
+    /// AI 모드가 활성화되어 있는지 확인
+    pub fn is_ai_mode(&self) -> bool {
+        self.ai_panel_side.is_some() && self.ai_state.is_some()
     }
 
     pub fn show_system_info(&mut self) {
@@ -2440,6 +2462,26 @@ impl App {
     }
 
     pub fn execute_delete(&mut self) {
+        // 이미지 뷰어에서 삭제 시 현재 보고 있는 이미지 삭제
+        if self.current_screen == Screen::ImageViewer {
+            if let Some(ref state) = self.image_viewer_state {
+                let path = state.path.clone();
+                match file_ops::delete_file(&path) {
+                    Ok(_) => {
+                        self.show_message("Deleted image");
+                        // 이미지 뷰어 닫기
+                        self.current_screen = Screen::DualPanel;
+                        self.image_viewer_state = None;
+                    }
+                    Err(e) => {
+                        self.show_message(&format!("Delete failed: {}", e));
+                    }
+                }
+                self.refresh_panels();
+            }
+            return;
+        }
+
         let files = self.get_operation_files();
         let source_path = self.active_panel().path.clone();
 

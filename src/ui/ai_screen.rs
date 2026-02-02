@@ -676,6 +676,10 @@ Keep responses concise and terminal-friendly.",
 }
 
 pub fn draw(frame: &mut Frame, state: &mut AIScreenState, area: Rect, theme: &Theme) {
+    draw_with_focus(frame, state, area, theme, true)
+}
+
+pub fn draw_with_focus(frame: &mut Frame, state: &mut AIScreenState, area: Rect, theme: &Theme, focused: bool) {
     // Fill background first
     let background = Block::default()
         .style(Style::default().bg(theme.ai_screen.bg));
@@ -687,53 +691,20 @@ pub fn draw(frame: &mut Frame, state: &mut AIScreenState, area: Rect, theme: &Th
             Constraint::Min(5),    // History area (no bottom border)
             Constraint::Length(1), // Separator line (├───┤)
             Constraint::Length(2), // Input area (no top border, reduced height)
-            Constraint::Length(1), // Help
         ])
         .split(area);
 
     // History area (with path and session in title)
-    draw_history(frame, state, chunks[0], theme);
+    draw_history(frame, state, chunks[0], theme, focused);
 
     // Draw separator line between history and input (├───┤)
-    draw_separator(frame, chunks[1], theme);
+    draw_separator(frame, chunks[1], theme, focused);
 
     // Input area
-    draw_input(frame, state, chunks[2], theme);
-
-    // Help (footer area)
-    let key_style = Style::default().fg(theme.ai_screen.footer_key).add_modifier(Modifier::BOLD);
-    let text_style = Style::default().fg(theme.ai_screen.footer_text);
-
-    let help_spans = if state.is_processing {
-        vec![
-            Span::styled("Esc", key_style),
-            Span::styled(" Cancel ", text_style),
-            Span::styled("PgUp", key_style),
-            Span::styled("/", text_style),
-            Span::styled("PgDn", key_style),
-            Span::styled(" Scroll", text_style),
-        ]
-    } else {
-        vec![
-            Span::styled("Enter", key_style),
-            Span::styled(" Send ", text_style),
-            Span::styled("Up/Dn", key_style),
-            Span::styled("/", text_style),
-            Span::styled("PgUp", key_style),
-            Span::styled("/", text_style),
-            Span::styled("PgDn", key_style),
-            Span::styled(" Scroll ", text_style),
-            Span::styled("Esc", key_style),
-            Span::styled(" Close", text_style),
-        ]
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(help_spans)),
-        chunks[3],
-    );
+    draw_input(frame, state, chunks[2], theme, focused);
 }
 
-fn draw_history(frame: &mut Frame, state: &mut AIScreenState, area: Rect, theme: &Theme) {
+fn draw_history(frame: &mut Frame, state: &mut AIScreenState, area: Rect, theme: &Theme, focused: bool) {
     // Build title with path and session info
     let session_info = if let Some(ref sid) = state.session_id {
         format!("Session: {}...", &sid[..sid.len().min(8)])
@@ -743,13 +714,19 @@ fn draw_history(frame: &mut Frame, state: &mut AIScreenState, area: Rect, theme:
 
     let title = format!(" {} | {} ", state.current_path, session_info);
 
+    // 포커스 여부에 따라 테두리 색상 결정
+    let border_color = if focused { theme.ai_screen.history_border } else { theme.panel.border };
+
+    // 타이틀 색상도 테두리와 동일하게
+    let title_color = if focused { theme.ai_screen.history_title } else { theme.panel.border };
+
     let block = Block::default()
         .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
-        .border_style(Style::default().fg(theme.ai_screen.history_border))
+        .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(theme.ai_screen.bg))
         .title(Span::styled(
             title,
-            Style::default().fg(theme.ai_screen.history_title).add_modifier(Modifier::BOLD),
+            Style::default().fg(title_color).add_modifier(Modifier::BOLD),
         ));
 
     let inner = block.inner(area);
@@ -898,12 +875,13 @@ fn draw_history(frame: &mut Frame, state: &mut AIScreenState, area: Rect, theme:
 }
 
 /// Draw separator line between history and input boxes (├───┤)
-fn draw_separator(frame: &mut Frame, area: Rect, theme: &Theme) {
+fn draw_separator(frame: &mut Frame, area: Rect, theme: &Theme, focused: bool) {
     if area.width < 2 {
         return;
     }
 
-    let border_style = Style::default().fg(theme.ai_screen.history_border);
+    let border_color = if focused { theme.ai_screen.history_border } else { theme.panel.border };
+    let border_style = Style::default().fg(border_color);
 
     // Build separator line: ├ + ─── + ┤
     let line = Line::from(vec![
@@ -915,11 +893,12 @@ fn draw_separator(frame: &mut Frame, area: Rect, theme: &Theme) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn draw_input(frame: &mut Frame, state: &AIScreenState, area: Rect, theme: &Theme) {
+fn draw_input(frame: &mut Frame, state: &AIScreenState, area: Rect, theme: &Theme, focused: bool) {
     // Use only LEFT, RIGHT, BOTTOM borders (top is shared separator line)
+    let border_color = if focused { theme.ai_screen.input_border } else { theme.panel.border };
     let block = Block::default()
         .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-        .border_style(Style::default().fg(theme.ai_screen.input_border))
+        .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(theme.ai_screen.bg));
 
     let inner = block.inner(area);

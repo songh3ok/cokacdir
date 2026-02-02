@@ -235,17 +235,27 @@ fn run_app<B: ratatui::backend::Backend>(
             .map(|p| p.is_active)
             .unwrap_or(false);
 
-        let poll_timeout = if app.current_screen == Screen::AIScreen || is_file_info_calculating || is_image_loading || is_progress_active {
+        let poll_timeout = if app.current_screen == Screen::AIScreen || app.is_ai_mode() || is_file_info_calculating || is_image_loading || is_progress_active {
             Duration::from_millis(100) // Fast polling for spinner animation / progress updates
         } else {
             Duration::from_millis(250)
         };
 
-        // Poll for AI responses if on AI screen
-        if app.current_screen == Screen::AIScreen {
+        // Poll for AI responses if on AI screen or AI mode (panel)
+        let mut ai_response_completed = false;
+        if app.current_screen == Screen::AIScreen || app.is_ai_mode() {
             if let Some(ref mut state) = app.ai_state {
+                let was_processing = state.is_processing;
                 state.poll_response();
+                // AI 응답 완료 감지
+                if was_processing && !state.is_processing {
+                    ai_response_completed = true;
+                }
             }
+        }
+        // AI 응답 완료 시 패널 새로고침 (파일 변경 반영)
+        if ai_response_completed {
+            app.refresh_panels();
         }
 
         // Poll for file info calculation if on FileInfo screen
@@ -392,7 +402,12 @@ fn run_app<B: ratatui::backend::Backend>(
                         }
                     }
                     Screen::ImageViewer => {
-                        ui::image_viewer::handle_input(app, key.code);
+                        // 다이얼로그가 열려있으면 다이얼로그 입력 처리
+                        if app.dialog.is_some() {
+                            ui::dialogs::handle_dialog_input(app, key.code, key.modifiers);
+                        } else {
+                            ui::image_viewer::handle_input(app, key.code);
+                        }
                     }
                     Screen::SearchResult => {
                         let should_close = ui::search_result::handle_input(
@@ -417,6 +432,25 @@ fn run_app<B: ratatui::backend::Backend>(
 }
 
 fn handle_dual_panel_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    // AI 모드일 때: active_panel이 AI 패널 쪽이면 AI로 입력 전달, 아니면 파일 패널 조작
+    if app.is_ai_mode() {
+        let ai_has_focus = app.ai_panel_side == Some(app.active_panel);
+        if code == KeyCode::Tab {
+            app.switch_panel();
+            return false;
+        }
+        if ai_has_focus {
+            if let Some(ref mut state) = app.ai_state {
+                if ui::ai_screen::handle_input(state, code, modifiers) {
+                    // AI 화면 종료 요청
+                    app.close_ai_screen();
+                }
+            }
+            return false;
+        }
+        // ai_has_focus가 false면 아래 파일 패널 로직으로 진행
+    }
+
     // Handle advanced search dialog first
     if app.advanced_search_state.active {
         if let Some(criteria) = ui::advanced_search::handle_input(&mut app.advanced_search_state, code) {

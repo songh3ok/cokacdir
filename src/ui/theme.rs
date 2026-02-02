@@ -898,9 +898,9 @@ impl Theme {
         // 이미지 뷰어
         let image_viewer = ImageViewerColors {
             // === 프레임 ===
-            bg: Color::Indexed(255),              // 배경
-            border: Color::Indexed(238),          // 테두리
-            title_text: Color::Indexed(238),      // 제목 텍스트
+            bg: Color::Indexed(255),              // 배경 (viewer.bg)
+            border: Color::Indexed(238),          // 테두리 (viewer.border)
+            title_text: Color::Indexed(249),      // 제목 텍스트 (viewer.header_text)
 
             // === 로딩 상태 ===
             loading_spinner: Color::Indexed(74),  // 스피너 (shortcut 색상)
@@ -1279,9 +1279,9 @@ impl Theme {
         };
 
         let image_viewer = ImageViewerColors {
-            bg: Color::Indexed(235),
-            border: Color::Indexed(252),
-            title_text: Color::Indexed(255),
+            bg: Color::Indexed(235),              // 배경 (viewer.bg)
+            border: Color::Indexed(252),          // 테두리 (viewer.border)
+            title_text: Color::Indexed(250),      // 제목 텍스트 (viewer.header_text)
             loading_spinner: Color::Indexed(117),
             loading_text: Color::Indexed(245),
             error_text: Color::Indexed(204),

@@ -56,12 +56,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     match app.current_screen {
         Screen::DualPanel => draw_dual_panel(frame, app, area, &theme),
         Screen::FileViewer => {
-            if let Some(ref mut state) = app.viewer_state {
+            if app.is_ai_mode() {
+                // AI 모드: 뷰어와 AI 화면을 나란히 표시
+                draw_viewer_with_ai(frame, app, area, &theme);
+            } else if let Some(ref mut state) = app.viewer_state {
                 file_viewer::draw(frame, state, area, &theme);
             }
         }
         Screen::FileEditor => {
-            if let Some(ref mut state) = app.editor_state {
+            if app.is_ai_mode() {
+                // AI 모드: 에디터와 AI 화면을 나란히 표시
+                draw_editor_with_ai(frame, app, area, &theme);
+            } else if let Some(ref mut state) = app.editor_state {
                 file_editor::draw(frame, state, area, &theme);
             }
         }
@@ -77,6 +83,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             system_info::draw(frame, &app.system_info_state, area, &theme);
         }
         Screen::ImageViewer => {
+            // 이미지 뷰어는 항상 배경(dual panel) 위에 오버레이로 표시
+            // AI 모드여도 draw_dual_panel_background가 AI 패널을 포함해서 그림
             image_viewer::draw(frame, app, area, &theme);
         }
         Screen::SearchResult => {
@@ -87,6 +95,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // Draw advanced search dialog overlay if active
     if app.advanced_search_state.active && app.current_screen == Screen::DualPanel {
         advanced_search::draw(frame, &app.advanced_search_state, area, &theme);
+    }
+
+    // Draw dialog overlay on top of everything (모든 화면 위에 다이얼로그 표시)
+    if let Some(ref dialog) = app.dialog {
+        dialogs::draw_dialog(frame, app, dialog, area, &theme);
     }
 
     // Update message timer
@@ -120,22 +133,49 @@ fn draw_dual_panel(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) 
     let left_bookmarked = app.settings.bookmarked_path.contains(&left_path_str);
     let right_bookmarked = app.settings.bookmarked_path.contains(&right_path_str);
 
-    panel::draw(
-        frame,
-        &mut app.left_panel,
-        panel_chunks[0],
-        app.active_panel == PanelSide::Left && app.dialog.is_none(),
-        left_bookmarked,
-        theme,
-    );
-    panel::draw(
-        frame,
-        &mut app.right_panel,
-        panel_chunks[1],
-        app.active_panel == PanelSide::Right && app.dialog.is_none(),
-        right_bookmarked,
-        theme,
-    );
+    // AI 모드일 때 해당 패널에 AI 화면 표시
+    let ai_on_left = app.ai_panel_side == Some(PanelSide::Left);
+    let ai_on_right = app.ai_panel_side == Some(PanelSide::Right);
+    let is_ai_mode = app.is_ai_mode();
+    let has_dialog = app.dialog.is_some();
+    let active_panel = app.active_panel;
+
+    // 왼쪽 패널: AI 또는 파일 목록
+    if ai_on_left {
+        if let Some(ref mut state) = app.ai_state {
+            let ai_focused = active_panel == PanelSide::Left && !has_dialog;
+            ai_screen::draw_with_focus(frame, state, panel_chunks[0], theme, ai_focused);
+        }
+    } else {
+        // AI 모드에서 파일 패널에 포커스: active_panel이 이쪽이고 AI가 반대쪽에 있을 때
+        let left_focused = active_panel == PanelSide::Left && !has_dialog && (!is_ai_mode || ai_on_right);
+        panel::draw(
+            frame,
+            &mut app.left_panel,
+            panel_chunks[0],
+            left_focused,
+            left_bookmarked,
+            theme,
+        );
+    }
+
+    // 오른쪽 패널: AI 또는 파일 목록
+    if ai_on_right {
+        if let Some(ref mut state) = app.ai_state {
+            let ai_focused = active_panel == PanelSide::Right && !has_dialog;
+            ai_screen::draw_with_focus(frame, state, panel_chunks[1], theme, ai_focused);
+        }
+    } else {
+        let right_focused = active_panel == PanelSide::Right && !has_dialog && (!is_ai_mode || ai_on_left);
+        panel::draw(
+            frame,
+            &mut app.right_panel,
+            panel_chunks[1],
+            right_focused,
+            right_bookmarked,
+            theme,
+        );
+    }
 
     // Status bar
     draw_status_bar(frame, app, chunks[1], theme);
@@ -143,10 +183,7 @@ fn draw_dual_panel(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) 
     // Function bar or message
     draw_function_bar(frame, app, chunks[2], theme);
 
-    // Dialog overlay
-    if let Some(ref dialog) = app.dialog {
-        dialogs::draw_dialog(frame, app, dialog, area, theme);
-    }
+    // Dialog overlay는 draw() 함수 끝에서 모든 화면 위에 그려짐
 }
 
 /// Public function for drawing dual panel background (used by overlay screens)
@@ -257,3 +294,58 @@ fn draw_function_bar(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// AI 모드에서 에디터와 AI 화면을 나란히 표시
+fn draw_editor_with_ai(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
+    let panel_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    let ai_on_left = app.ai_panel_side == Some(PanelSide::Left);
+
+    if ai_on_left {
+        // AI 왼쪽, 에디터 오른쪽
+        if let Some(ref mut state) = app.ai_state {
+            ai_screen::draw_with_focus(frame, state, panel_chunks[0], theme, false);
+        }
+        if let Some(ref mut state) = app.editor_state {
+            file_editor::draw(frame, state, panel_chunks[1], theme);
+        }
+    } else {
+        // 에디터 왼쪽, AI 오른쪽
+        if let Some(ref mut state) = app.editor_state {
+            file_editor::draw(frame, state, panel_chunks[0], theme);
+        }
+        if let Some(ref mut state) = app.ai_state {
+            ai_screen::draw_with_focus(frame, state, panel_chunks[1], theme, false);
+        }
+    }
+}
+
+/// AI 모드에서 뷰어와 AI 화면을 나란히 표시
+fn draw_viewer_with_ai(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
+    let panel_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    let ai_on_left = app.ai_panel_side == Some(PanelSide::Left);
+
+    if ai_on_left {
+        // AI 왼쪽, 뷰어 오른쪽
+        if let Some(ref mut state) = app.ai_state {
+            ai_screen::draw_with_focus(frame, state, panel_chunks[0], theme, false);
+        }
+        if let Some(ref mut state) = app.viewer_state {
+            file_viewer::draw(frame, state, panel_chunks[1], theme);
+        }
+    } else {
+        // 뷰어 왼쪽, AI 오른쪽
+        if let Some(ref mut state) = app.viewer_state {
+            file_viewer::draw(frame, state, panel_chunks[0], theme);
+        }
+        if let Some(ref mut state) = app.ai_state {
+            ai_screen::draw_with_focus(frame, state, panel_chunks[1], theme, false);
+        }
+    }
+}
