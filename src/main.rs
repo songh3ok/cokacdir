@@ -209,7 +209,95 @@ fn main() -> io::Result<()> {
         eprintln!("Error: {}", err);
     }
 
+    // Print goodbye message
+    print_goodbye_message();
+
     Ok(())
+}
+
+fn print_goodbye_message() {
+    // Check for updates
+    check_for_updates();
+
+    println!("Thank you for using COKACDIR! 🙏");
+    println!();
+    println!("If you found this useful, consider checking out my other content:");
+    println!("  📺 YouTube: https://www.youtube.com/@코드깎는노인");
+    println!("  📚 Classes: https://cokac.com/");
+    println!();
+    println!("Happy coding!");
+}
+
+fn check_for_updates() {
+    let current_version = env!("CARGO_PKG_VERSION");
+
+    // Fetch latest version from GitHub (with timeout)
+    let output = std::process::Command::new("curl")
+        .args([
+            "-fsSL",
+            "--max-time", "3",
+            "https://raw.githubusercontent.com/kstost/cokacdir/refs/heads/main/Cargo.toml"
+        ])
+        .output();
+
+    let latest_version = match output {
+        Ok(output) if output.status.success() => {
+            let content = String::from_utf8_lossy(&output.stdout);
+            parse_version_from_cargo_toml(&content)
+        }
+        _ => None,
+    };
+
+    if let Some(latest) = latest_version {
+        if is_newer_version(&latest, current_version) {
+            println!("┌──────────────────────────────────────────────────────────────────────────┐");
+            println!("│  🚀 New version available: v{} (current: v{})                            ", latest, current_version);
+            println!("│                                                                          │");
+            println!("│  Update with:                                                            │");
+            println!("│  /bin/bash -c \"$(curl -fsSL https://cokacdir.cokac.com/install.sh)\"      │");
+            println!("└──────────────────────────────────────────────────────────────────────────┘");
+            println!();
+        }
+    }
+}
+
+fn parse_version_from_cargo_toml(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with("version") {
+            // Parse: version = "x.x.x"
+            if let Some(start) = line.find('"') {
+                if let Some(end) = line.rfind('"') {
+                    if start < end {
+                        return Some(line[start + 1..end].to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn is_newer_version(latest: &str, current: &str) -> bool {
+    let parse = |v: &str| -> Vec<u32> {
+        v.split('.')
+            .filter_map(|s| s.parse().ok())
+            .collect()
+    };
+
+    let latest_parts = parse(latest);
+    let current_parts = parse(current);
+
+    for i in 0..latest_parts.len().max(current_parts.len()) {
+        let l = latest_parts.get(i).copied().unwrap_or(0);
+        let c = current_parts.get(i).copied().unwrap_or(0);
+        if l > c {
+            return true;
+        } else if l < c {
+            return false;
+        }
+    }
+    false
 }
 
 fn run_app<B: ratatui::backend::Backend>(
@@ -551,6 +639,9 @@ fn handle_dual_panel_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers
 
         // Bookmark toggle - '\''
         KeyCode::Char('\'') => app.toggle_bookmark(),
+
+        // Handler setup - 'u'
+        KeyCode::Char('u') | KeyCode::Char('U') => app.show_handler_dialog(),
 
         // macOS: Open current folder in Finder
         #[cfg(target_os = "macos")]

@@ -188,6 +188,7 @@ pub enum DialogType {
     DuplicateConflict,
     Settings,
     ExtensionHandlerError,
+    BinaryFileHandler,
 }
 
 /// Settings dialog state
@@ -828,6 +829,9 @@ pub struct App {
     // Pending large file path (for confirmation dialog)
     pub pending_large_file: Option<std::path::PathBuf>,
 
+    // Pending binary file path and extension (for handler setup dialog)
+    pub pending_binary_file: Option<(std::path::PathBuf, String)>,
+
     // Search result state (재귀 검색 결과)
     pub search_result_state: crate::ui::search_result::SearchResultState,
 
@@ -916,6 +920,7 @@ impl App {
             image_viewer_state: None,
             pending_large_image: None,
             pending_large_file: None,
+            pending_binary_file: None,
             search_result_state: crate::ui::search_result::SearchResultState::default(),
             previous_screen: None,
             clipboard: None,
@@ -997,6 +1002,7 @@ impl App {
             image_viewer_state: None,
             pending_large_image: None,
             pending_large_file: None,
+            pending_binary_file: None,
             search_result_state: crate::ui::search_result::SearchResultState::default(),
             previous_screen: None,
             clipboard: None,
@@ -1333,8 +1339,26 @@ impl App {
                         self.current_screen = Screen::ImageViewer;
                     }
                 } else {
-                    // Regular file - open editor
-                    self.edit_file()
+                    // Regular file - check if binary
+                    if Self::is_binary_file(&path) {
+                        // Binary file without handler - show handler setup dialog
+                        let extension = path.extension()
+                            .map(|e| e.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        self.pending_binary_file = Some((path, extension.clone()));
+                        self.dialog = Some(Dialog {
+                            dialog_type: DialogType::BinaryFileHandler,
+                            input: String::new(),
+                            cursor_pos: 0,
+                            message: extension,
+                            completion: None,
+                            selected_button: 0, // 0: Set mode (no existing handler)
+                            selection: None,
+                        });
+                    } else {
+                        // Text file - open editor
+                        self.edit_file()
+                    }
                 }
             }
         }
@@ -1352,16 +1376,59 @@ impl App {
             || lower.ends_with(".txz")
     }
 
+    /// Check if a file is binary (not a text file)
+    /// Reads the first 8KB of the file and checks for null bytes or high proportion of non-text bytes
+    fn is_binary_file(path: &std::path::Path) -> bool {
+        use std::io::Read;
+
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(_) => return false, // Can't open, assume text
+        };
+
+        let mut reader = std::io::BufReader::new(file);
+        let mut buffer = [0u8; 8192]; // Read first 8KB
+
+        let bytes_read = match reader.read(&mut buffer) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+
+        if bytes_read == 0 {
+            return false; // Empty file is text
+        }
+
+        // Check for null bytes (strong indicator of binary)
+        // Also count non-printable bytes (excluding common whitespace)
+        let mut non_text_count = 0;
+        for &byte in &buffer[..bytes_read] {
+            if byte == 0 {
+                return true; // Null byte = definitely binary
+            }
+            // Non-printable and non-whitespace characters
+            // Allow: tab (9), newline (10), carriage return (13), and printable ASCII (32-126)
+            // Also allow UTF-8 continuation bytes (128-255) for international text
+            if byte < 9 || (byte > 13 && byte < 32) || byte == 127 {
+                non_text_count += 1;
+            }
+        }
+
+        // If more than 10% of bytes are non-text control characters, consider it binary
+        let threshold = bytes_read / 10;
+        non_text_count > threshold
+    }
+
     /// Try to execute extension handler commands for a file
     /// Returns Ok(true) if a handler was executed successfully
     /// Returns Ok(false) if no handler is defined for this extension
     /// Returns Err(error_message) if all handlers failed
     ///
     /// Handler prefix:
-    /// - No prefix: Background execution (for GUI apps like feh, vlc)
-    /// - @ prefix: Terminal mode execution (for TUI apps like vim, nano)
-    ///   Example: "@vim {{FILEPATH}}" - suspends TUI, runs vim, restores TUI
-    fn try_extension_handler(&mut self, path: &std::path::Path) -> Result<bool, String> {
+    /// - No prefix: Foreground execution (suspends TUI, runs command, restores TUI)
+    ///   Example: "vim {{FILEPATH}}" - for TUI apps like vim, nano, less
+    /// - @ prefix: Background execution (for GUI apps like evince, feh, vlc)
+    ///   Example: "@evince {{FILEPATH}}" - spawns detached, cokacdir continues
+    pub fn try_extension_handler(&mut self, path: &std::path::Path) -> Result<bool, String> {
         // Get file extension
         let extension = match path.extension() {
             Some(ext) => ext.to_string_lossy().to_string(),
@@ -1385,8 +1452,8 @@ impl App {
 
         // Try each handler in order (fallback mechanism)
         for handler_template in &handlers {
-            // Check for terminal mode prefix (@)
-            let (is_terminal_mode, template) = if handler_template.starts_with('@') {
+            // Check for background mode prefix (@)
+            let (is_background_mode, template) = if handler_template.starts_with('@') {
                 (true, &handler_template[1..])
             } else {
                 (false, handler_template.as_str())
@@ -1395,12 +1462,12 @@ impl App {
             // Replace {{FILEPATH}} with escaped file path
             let command = template.replace("{{FILEPATH}}", &escaped_path);
 
-            if is_terminal_mode {
-                // Terminal mode: suspend TUI, run command, restore TUI
-                match self.execute_terminal_command(&command) {
+            if is_background_mode {
+                // Background mode: spawn and detach (@ prefix)
+                match self.execute_background_command(&command, template) {
                     Ok(true) => return Ok(true),
                     Ok(false) => {
-                        last_error = format!("Command failed: {}", template);
+                        // Command failed, error already set in last_error via closure
                         continue;
                     }
                     Err(e) => {
@@ -1409,11 +1476,11 @@ impl App {
                     }
                 }
             } else {
-                // Background mode: spawn and detach
-                match self.execute_background_command(&command, template) {
+                // Foreground mode: suspend TUI, run command, restore TUI (default)
+                match self.execute_terminal_command(&command) {
                     Ok(true) => return Ok(true),
                     Ok(false) => {
-                        // Command failed, error already set in last_error via closure
+                        last_error = format!("Command failed: {}", template);
                         continue;
                     }
                     Err(e) => {
@@ -1513,7 +1580,7 @@ impl App {
     }
 
     /// Show extension handler error dialog
-    fn show_extension_handler_error(&mut self, error_message: &str) {
+    pub fn show_extension_handler_error(&mut self, error_message: &str) {
         self.dialog = Some(Dialog {
             dialog_type: DialogType::ExtensionHandlerError,
             input: String::new(),
@@ -1521,6 +1588,49 @@ impl App {
             message: error_message.to_string(),
             completion: None,
             selected_button: 0,
+            selection: None,
+        });
+    }
+
+    /// Show handler setup dialog for current file (u key)
+    pub fn show_handler_dialog(&mut self) {
+        let panel = self.active_panel();
+        if panel.files.is_empty() {
+            return;
+        }
+
+        let file = &panel.files[panel.selected_index];
+        if file.is_directory {
+            return; // No handler for directories
+        }
+
+        let path = panel.path.join(&file.name);
+        let extension = path.extension()
+            .map(|e| e.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        if extension.is_empty() {
+            self.message = Some("No extension - cannot set handler".to_string());
+            self.message_timer = 30;
+            return;
+        }
+
+        // Check if handler already exists
+        let existing_handler = self.settings.get_extension_handler(&extension)
+            .and_then(|handlers| handlers.first().cloned())
+            .unwrap_or_default();
+
+        let is_edit_mode = !existing_handler.is_empty();
+        let cursor_pos = existing_handler.chars().count();
+
+        self.pending_binary_file = Some((path, extension.clone()));
+        self.dialog = Some(Dialog {
+            dialog_type: DialogType::BinaryFileHandler,
+            input: existing_handler,
+            cursor_pos,
+            message: extension,
+            completion: None,
+            selected_button: if is_edit_mode { 1 } else { 0 }, // 0: Set, 1: Edit
             selection: None,
         });
     }

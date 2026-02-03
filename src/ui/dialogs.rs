@@ -312,6 +312,9 @@ pub fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, th
         DialogType::Settings => {
             (42, 5, 5) // Settings dialog: width=42, height=5
         }
+        DialogType::BinaryFileHandler => {
+            (75, 11, 11) // Binary file handler dialog
+        }
     };
 
     let x = area.x + (area.width.saturating_sub(width)) / 2;
@@ -370,7 +373,286 @@ pub fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, th
         DialogType::ExtensionHandlerError => {
             draw_error_dialog(frame, dialog, dialog_area, theme, " Handler Error ");
         }
+        DialogType::BinaryFileHandler => {
+            draw_binary_file_handler_dialog(frame, dialog, dialog_area, theme);
+        }
     }
+}
+
+/// Binary file handler setup dialog
+fn draw_binary_file_handler_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, theme: &Theme) {
+    let extension = &dialog.message; // Extension is stored in message field
+    let is_edit_mode = dialog.selected_button == 1; // 0: Set, 1: Edit (fixed at dialog creation)
+
+    let title = if is_edit_mode { " Edit Handler " } else { " Set Handler " };
+
+    let block = Block::default()
+        .title(title)
+        .title_style(Style::default().fg(theme.dialog.title).add_modifier(Modifier::BOLD))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.dialog.border))
+        .style(Style::default().bg(theme.dialog.bg));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Message varies based on whether handler exists
+    let (msg1, msg2) = if is_edit_mode {
+        (
+            format!("A handler is configured for \".{}\" files.", extension),
+            "You can modify or replace the command below.".to_string(),
+        )
+    } else {
+        (
+            format!("No handler configured for \".{}\" files.", extension),
+            "Please specify a program to open this file type.".to_string(),
+        )
+    };
+
+    let msg1_area = Rect::new(inner.x + 1, inner.y + 1, inner.width - 2, 1);
+    frame.render_widget(
+        Paragraph::new(msg1).style(Style::default().fg(theme.dialog.text)),
+        msg1_area,
+    );
+
+    let msg2_area = Rect::new(inner.x + 1, inner.y + 2, inner.width - 2, 1);
+    frame.render_widget(
+        Paragraph::new(msg2).style(Style::default().fg(theme.dialog.text)),
+        msg2_area,
+    );
+
+    // Message line 3 (extension specific)
+    let msg3 = format!(
+        "Enter the command to use for \".{}\" files:",
+        extension
+    );
+    let msg3_area = Rect::new(inner.x + 1, inner.y + 3, inner.width - 2, 1);
+    frame.render_widget(
+        Paragraph::new(msg3).style(Style::default().fg(theme.dialog.text)),
+        msg3_area,
+    );
+
+    // Input field with placeholder (extension-specific examples)
+    let input_area = Rect::new(inner.x + 1, inner.y + 5, inner.width - 2, 1);
+    let placeholder = get_handler_placeholder(extension);
+    let display_text = if dialog.input.is_empty() {
+        placeholder.clone()
+    } else {
+        dialog.input.clone()
+    };
+    let input_style = if dialog.input.is_empty() {
+        Style::default().fg(theme.dialog.text_dim) // placeholder uses dim text color
+    } else {
+        Style::default().fg(theme.dialog.input_text)
+    };
+    frame.render_widget(
+        Paragraph::new(display_text).style(input_style),
+        input_area,
+    );
+
+    // Key hints (Enter: confirm, Esc: cancel)
+    let button_style = Style::default()
+        .fg(theme.confirm_dialog.button_selected_text)
+        .bg(theme.confirm_dialog.button_selected_bg);
+
+    let buttons = Line::from(vec![
+        Span::styled("  Enter: confirm  ", button_style),
+        Span::raw("    "),
+        Span::styled("  Esc: cancel  ", button_style),
+    ]);
+    let button_area = Rect::new(inner.x + 1, inner.y + inner.height - 2, inner.width - 2, 1);
+    frame.render_widget(
+        Paragraph::new(buttons).alignment(ratatui::layout::Alignment::Center),
+        button_area,
+    );
+
+    // Always show cursor in input field
+    let cursor_x = input_area.x + dialog.cursor_pos as u16;
+    let cursor_y = input_area.y;
+    frame.set_cursor_position(ratatui::layout::Position::new(cursor_x, cursor_y));
+}
+
+/// Get placeholder example command for file extension
+fn get_handler_placeholder(extension: &str) -> String {
+    let ext_lower = extension.to_lowercase();
+    let command = match ext_lower.as_str() {
+        // Images - common formats
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" => "feh {{FILEPATH}}",
+        "svg" | "svgz" => "inkscape {{FILEPATH}}",
+        "ico" | "icns" => "feh {{FILEPATH}}",
+        "tif" | "tiff" => "gimp {{FILEPATH}}",
+        "psd" | "xcf" => "gimp {{FILEPATH}}",
+        "raw" | "cr2" | "nef" | "arw" | "dng" => "darktable {{FILEPATH}}",
+        "heic" | "heif" => "feh {{FILEPATH}}",
+        "jxl" | "avif" => "feh {{FILEPATH}}",
+
+        // Videos
+        "mp4" | "avi" | "mkv" | "webm" | "mov" => "vlc {{FILEPATH}}",
+        "flv" | "wmv" | "m4v" | "mpg" | "mpeg" => "vlc {{FILEPATH}}",
+        "3gp" | "3g2" | "ogv" | "vob" | "mts" | "m2ts" => "vlc {{FILEPATH}}",
+        "ts" => "vlc {{FILEPATH}}",
+
+        // Audio
+        "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" => "vlc {{FILEPATH}}",
+        "wma" | "opus" | "aiff" | "ape" | "mka" => "vlc {{FILEPATH}}",
+        "mid" | "midi" => "timidity {{FILEPATH}}",
+        "mod" | "xm" | "it" | "s3m" => "vlc {{FILEPATH}}",
+
+        // Documents - PDF
+        "pdf" => "evince {{FILEPATH}}",
+        "djvu" | "djv" => "evince {{FILEPATH}}",
+        "epub" | "mobi" | "azw" | "azw3" => "calibre {{FILEPATH}}",
+        "fb2" => "calibre {{FILEPATH}}",
+        "cbz" | "cbr" | "cb7" => "evince {{FILEPATH}}",
+
+        // Documents - Office
+        "doc" | "docx" | "docm" => "libreoffice {{FILEPATH}}",
+        "xls" | "xlsx" | "xlsm" | "xlsb" => "libreoffice {{FILEPATH}}",
+        "ppt" | "pptx" | "pptm" => "libreoffice {{FILEPATH}}",
+        "odt" | "ods" | "odp" | "odg" | "odf" => "libreoffice {{FILEPATH}}",
+        "rtf" | "wps" | "wpd" => "libreoffice {{FILEPATH}}",
+        "csv" | "tsv" => "libreoffice {{FILEPATH}}",
+
+        // Programming - Systems
+        "rs" => "vim {{FILEPATH}}",
+        "c" | "h" => "vim {{FILEPATH}}",
+        "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" => "vim {{FILEPATH}}",
+        "go" => "vim {{FILEPATH}}",
+        "zig" => "vim {{FILEPATH}}",
+        "asm" | "s" => "vim {{FILEPATH}}",
+
+        // Programming - JVM
+        "java" => "vim {{FILEPATH}}",
+        "kt" | "kts" => "vim {{FILEPATH}}",
+        "scala" | "sc" => "vim {{FILEPATH}}",
+        "groovy" | "gradle" => "vim {{FILEPATH}}",
+        "clj" | "cljs" | "cljc" | "edn" => "vim {{FILEPATH}}",
+
+        // Programming - .NET
+        "cs" => "vim {{FILEPATH}}",
+        "fs" | "fsx" | "fsi" => "vim {{FILEPATH}}",
+        "vb" => "vim {{FILEPATH}}",
+
+        // Programming - Scripting
+        "py" | "pyw" | "pyx" | "pxd" => "vim {{FILEPATH}}",
+        "rb" | "erb" | "rake" => "vim {{FILEPATH}}",
+        "pl" | "pm" | "pod" => "vim {{FILEPATH}}",
+        "php" | "phtml" | "php3" | "php4" | "php5" => "vim {{FILEPATH}}",
+        "lua" => "vim {{FILEPATH}}",
+        "tcl" => "vim {{FILEPATH}}",
+        "r" | "rmd" => "vim {{FILEPATH}}",
+        "jl" => "vim {{FILEPATH}}",
+
+        // Programming - Web/JS
+        "js" | "mjs" | "cjs" => "vim {{FILEPATH}}",
+        "jsx" => "vim {{FILEPATH}}",
+        "ts" | "mts" | "cts" => "vim {{FILEPATH}}",
+        "tsx" => "vim {{FILEPATH}}",
+        "vue" | "svelte" => "vim {{FILEPATH}}",
+        "coffee" => "vim {{FILEPATH}}",
+
+        // Programming - Functional
+        "hs" | "lhs" => "vim {{FILEPATH}}",
+        "ml" | "mli" | "mll" | "mly" => "vim {{FILEPATH}}",
+        "ex" | "exs" => "vim {{FILEPATH}}",
+        "erl" | "hrl" => "vim {{FILEPATH}}",
+        "elm" => "vim {{FILEPATH}}",
+        "purs" => "vim {{FILEPATH}}",
+        "lisp" | "cl" | "el" | "scm" | "ss" | "rkt" => "vim {{FILEPATH}}",
+
+        // Programming - Other
+        "swift" => "vim {{FILEPATH}}",
+        "m" | "mm" => "vim {{FILEPATH}}",
+        "dart" => "vim {{FILEPATH}}",
+        "nim" => "vim {{FILEPATH}}",
+        "cr" => "vim {{FILEPATH}}",
+        "v" | "vhdl" | "vhd" => "vim {{FILEPATH}}",
+        "sv" | "svh" => "vim {{FILEPATH}}",
+        "d" => "vim {{FILEPATH}}",
+        "pas" | "pp" | "inc" => "vim {{FILEPATH}}",
+        "ada" | "adb" | "ads" => "vim {{FILEPATH}}",
+        "f" | "f90" | "f95" | "f03" | "f08" | "for" => "vim {{FILEPATH}}",
+        "cob" | "cbl" => "vim {{FILEPATH}}",
+        "pro" | "pl" => "vim {{FILEPATH}}",
+
+        // Markup/Config - Web
+        "html" | "htm" | "xhtml" | "shtml" => "firefox {{FILEPATH}}",
+        "css" | "scss" | "sass" | "less" | "styl" => "vim {{FILEPATH}}",
+
+        // Markup/Config - Data
+        "json" | "jsonc" | "json5" => "vim {{FILEPATH}}",
+        "yaml" | "yml" => "vim {{FILEPATH}}",
+        "toml" => "vim {{FILEPATH}}",
+        "xml" | "xsl" | "xslt" | "xsd" | "dtd" => "vim {{FILEPATH}}",
+        "ini" | "cfg" | "conf" | "config" => "vim {{FILEPATH}}",
+        "env" | "properties" => "vim {{FILEPATH}}",
+        "plist" => "vim {{FILEPATH}}",
+
+        // Markup/Config - Documentation
+        "md" | "markdown" | "mdown" | "mkd" => "vim {{FILEPATH}}",
+        "rst" | "rest" => "vim {{FILEPATH}}",
+        "adoc" | "asciidoc" => "vim {{FILEPATH}}",
+        "tex" | "latex" | "ltx" | "sty" | "cls" => "vim {{FILEPATH}}",
+        "org" => "vim {{FILEPATH}}",
+        "wiki" | "mediawiki" => "vim {{FILEPATH}}",
+
+        // Text/Logs
+        "txt" | "text" => "vim {{FILEPATH}}",
+        "log" | "logs" => "vim {{FILEPATH}}",
+        "nfo" | "diz" => "vim {{FILEPATH}}",
+
+        // Shell/Scripts
+        "sh" | "bash" | "zsh" | "fish" | "ksh" | "csh" | "tcsh" => "vim {{FILEPATH}}",
+        "ps1" | "psm1" | "psd1" => "vim {{FILEPATH}}",
+        "bat" | "cmd" => "vim {{FILEPATH}}",
+        "awk" | "sed" => "vim {{FILEPATH}}",
+
+        // Build/DevOps
+        "makefile" | "mk" | "cmake" => "vim {{FILEPATH}}",
+        "dockerfile" => "vim {{FILEPATH}}",
+        "vagrantfile" => "vim {{FILEPATH}}",
+        "jenkinsfile" => "vim {{FILEPATH}}",
+        "tf" | "tfvars" | "hcl" => "vim {{FILEPATH}}",
+        "nix" => "vim {{FILEPATH}}",
+
+        // Database
+        "sql" | "mysql" | "pgsql" | "plsql" => "vim {{FILEPATH}}",
+        "db" | "sqlite" | "sqlite3" => "sqlitebrowser {{FILEPATH}}",
+
+        // Archives
+        "zip" | "7z" | "rar" | "tar" => "file-roller {{FILEPATH}}",
+        "gz" | "bz2" | "xz" | "lz" | "lzma" | "zst" => "file-roller {{FILEPATH}}",
+        "tgz" | "tbz2" | "txz" => "file-roller {{FILEPATH}}",
+        "cab" | "arj" | "lzh" | "ace" => "file-roller {{FILEPATH}}",
+        "deb" | "rpm" => "file-roller {{FILEPATH}}",
+        "iso" | "img" | "dmg" => "file-roller {{FILEPATH}}",
+
+        // 3D/CAD
+        "blend" => "blender {{FILEPATH}}",
+        "obj" | "fbx" | "stl" | "3ds" | "dae" => "blender {{FILEPATH}}",
+        "gltf" | "glb" => "blender {{FILEPATH}}",
+        "dwg" | "dxf" => "librecad {{FILEPATH}}",
+        "step" | "stp" | "iges" | "igs" => "freecad {{FILEPATH}}",
+
+        // Fonts
+        "ttf" | "otf" | "woff" | "woff2" | "eot" => "gnome-font-viewer {{FILEPATH}}",
+
+        // Misc binary
+        "bin" | "exe" | "dll" | "so" | "dylib" => "hexdump -C {{FILEPATH}} | less",
+        "o" | "a" | "lib" => "hexdump -C {{FILEPATH}} | less",
+        "class" | "jar" | "war" | "ear" => "file-roller {{FILEPATH}}",
+        "pyc" | "pyo" => "hexdump -C {{FILEPATH}} | less",
+
+        // Notebooks
+        "ipynb" => "jupyter notebook {{FILEPATH}}",
+
+        // Certificates/Keys
+        "pem" | "crt" | "cer" | "key" | "csr" | "p12" | "pfx" => "vim {{FILEPATH}}",
+
+        // Default
+        _ => "xdg-open {{FILEPATH}}",
+    };
+    command.to_string()
 }
 
 /// 간결한 입력 다이얼로그 (Find File, Mkdir, Rename)
@@ -1788,6 +2070,9 @@ pub fn handle_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers
                     _ => {}
                 }
             }
+            DialogType::BinaryFileHandler => {
+                return handle_binary_file_handler_input(app, code);
+            }
             _ => {
                 // selection 상태에서의 특수 처리
                 if let Some((sel_start, sel_end)) = dialog.selection {
@@ -2864,6 +3149,110 @@ fn handle_settings_dialog_input(app: &mut App, code: KeyCode) -> bool {
                 let theme_name = state.current_theme();
                 app.theme = crate::ui::theme::Theme::load(theme_name);
             }
+        }
+        _ => {}
+    }
+    false
+}
+
+/// Handle input for binary file handler dialog
+fn handle_binary_file_handler_input(app: &mut App, code: KeyCode) -> bool {
+    let dialog = match app.dialog.as_mut() {
+        Some(d) => d,
+        None => return false,
+    };
+
+    match code {
+        KeyCode::Esc => {
+            // Cancel - close dialog without saving
+            app.dialog = None;
+            app.pending_binary_file = None;
+        }
+        KeyCode::Enter => {
+            // Confirm - save/remove handler
+            let input = dialog.input.trim().to_string();
+            let is_edit_mode = dialog.selected_button == 1;
+
+            if let Some((path, extension)) = app.pending_binary_file.take() {
+                if !extension.is_empty() {
+                    let ext_lower = extension.to_lowercase();
+
+                    if input.is_empty() {
+                        // Empty input - remove handler (only meaningful in edit mode)
+                        if is_edit_mode {
+                            app.settings.extension_handler.remove(&ext_lower);
+                            app.message = Some(format!("Handler removed for .{}", ext_lower));
+                            app.message_timer = 30;
+
+                            // Save settings
+                            if let Err(e) = app.settings.save() {
+                                app.message = Some(format!("Failed to save settings: {}", e));
+                                app.message_timer = 30;
+                            }
+                        }
+                        // In set mode with empty input, just close without action
+                    } else {
+                        // Non-empty input - add or update handler
+                        app.settings.extension_handler
+                            .entry(ext_lower.clone())
+                            .or_insert_with(Vec::new)
+                            .insert(0, input.clone()); // Insert at front as first choice
+
+                        // Save settings
+                        if let Err(e) = app.settings.save() {
+                            app.message = Some(format!("Failed to save settings: {}", e));
+                            app.message_timer = 30;
+                        }
+
+                        // Close dialog and try to execute the handler on the file
+                        app.dialog = None;
+                        if let Err(error_msg) = app.try_extension_handler(&path) {
+                            app.show_extension_handler_error(&error_msg);
+                        }
+                        return false;
+                    }
+                }
+            }
+            app.dialog = None;
+        }
+        KeyCode::Char(c) => {
+            let mut chars: Vec<char> = dialog.input.chars().collect();
+            chars.insert(dialog.cursor_pos, c);
+            dialog.input = chars.into_iter().collect();
+            dialog.cursor_pos += 1;
+        }
+        KeyCode::Backspace => {
+            if dialog.cursor_pos > 0 {
+                let mut chars: Vec<char> = dialog.input.chars().collect();
+                chars.remove(dialog.cursor_pos - 1);
+                dialog.input = chars.into_iter().collect();
+                dialog.cursor_pos -= 1;
+            }
+        }
+        KeyCode::Delete => {
+            let chars: Vec<char> = dialog.input.chars().collect();
+            if dialog.cursor_pos < chars.len() {
+                let mut chars = chars;
+                chars.remove(dialog.cursor_pos);
+                dialog.input = chars.into_iter().collect();
+            }
+        }
+        KeyCode::Left => {
+            if dialog.cursor_pos > 0 {
+                dialog.cursor_pos -= 1;
+            }
+        }
+        KeyCode::Right => {
+            let len = dialog.input.chars().count();
+            if dialog.cursor_pos < len {
+                dialog.cursor_pos += 1;
+            }
+        }
+        KeyCode::Home => {
+            dialog.cursor_pos = 0;
+        }
+        KeyCode::End => {
+            dialog.cursor_pos = dialog.input.chars().count();
         }
         _ => {}
     }

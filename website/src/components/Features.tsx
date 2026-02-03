@@ -37,7 +37,7 @@ const features: { icon: typeof Zap; title: string; description: string; highligh
   {
     icon: Settings2,
     title: 'Custom File Handlers',
-    description: 'Define custom programs for each file extension. Open images in feh, videos in VLC, code in vim — with fallback support and terminal mode for TUI apps.',
+    description: 'Define custom programs for each file extension. Open images in feh, videos in VLC, code in vim — with fallback support and background mode for GUI apps.',
   },
   {
     icon: Activity,

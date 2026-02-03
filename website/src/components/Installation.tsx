@@ -94,17 +94,18 @@ export default function Installation() {
           <div className="bg-bg-elevated rounded-lg p-4 font-mono text-sm overflow-x-auto">
             <pre className="text-zinc-300">{`{
   "extension_handler": {
-    "jpg|jpeg|png|gif": ["feh {{FILEPATH}}"],
-    "mp4|avi|mkv": ["vlc {{FILEPATH}}"],
-    "pdf": ["evince {{FILEPATH}}"],
-    "rs|py|js": ["@vim {{FILEPATH}}"]
+    "jpg|jpeg|png|gif": ["@feh {{FILEPATH}}"],
+    "mp4|avi|mkv": ["@vlc {{FILEPATH}}"],
+    "pdf": ["@evince {{FILEPATH}}"],
+    "rs|py|js": ["vim {{FILEPATH}}"]
   }
 }`}</pre>
           </div>
           <div className="mt-4 space-y-2 text-xs text-zinc-500">
             <p><code className="text-accent-cyan">|</code> — Combine multiple extensions</p>
-            <p><code className="text-accent-cyan">@</code> — Terminal mode for TUI apps (vim, nano)</p>
+            <p><code className="text-accent-cyan">@</code> — Background mode for GUI apps (evince, feh)</p>
             <p><code className="text-accent-cyan">["cmd1", "cmd2"]</code> — Fallback commands</p>
+            <p><code className="text-accent-cyan">u</code> — Press on any file to set/edit handler interactively</p>
           </div>
         </motion.div>
       </div>

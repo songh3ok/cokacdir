@@ -222,6 +222,7 @@ fn build_help_content(theme: &Theme) -> Vec<Line<'static>> {
     lines.push(key_line("K", "Create new directory"));
     lines.push(key_line("R", "Rename file/directory"));
     lines.push(key_line("T", "Create tar archive"));
+    lines.push(key_line("U", "Set/Edit file handler"));
     lines.push(key_line("X / Delete", "Delete file(s)"));
     lines.push(key_line("F", "Find/search files"));
     #[cfg(target_os = "macos")]

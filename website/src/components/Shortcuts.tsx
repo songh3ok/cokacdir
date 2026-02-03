@@ -22,6 +22,7 @@ const shortcutGroups = [
       { key: 'x', action: 'Delete' },
       { key: 'r', action: 'Rename' },
       { key: 't / f', action: 'Tar archive / Find' },
+      { key: 'u', action: 'Set/Edit file handler' },
     ],
   },
   {

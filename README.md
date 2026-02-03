@@ -85,11 +85,11 @@ Edit `~/.cokacdir/settings.json` and add the `extension_handler` section:
 ```json
 {
   "extension_handler": {
-    "jpg|jpeg|png|gif|webp": ["feh {{FILEPATH}}", "eog {{FILEPATH}}"],
-    "mp4|avi|mkv|webm": ["vlc {{FILEPATH}}", "mpv {{FILEPATH}}"],
-    "pdf": ["evince {{FILEPATH}}", "xdg-open {{FILEPATH}}"],
-    "rs|py|js|ts": ["@vim {{FILEPATH}}", "@nano {{FILEPATH}}"],
-    "md": ["@vim {{FILEPATH}}"]
+    "jpg|jpeg|png|gif|webp": ["@feh {{FILEPATH}}", "@eog {{FILEPATH}}"],
+    "mp4|avi|mkv|webm": ["@vlc {{FILEPATH}}", "@mpv {{FILEPATH}}"],
+    "pdf": ["@evince {{FILEPATH}}", "@xdg-open {{FILEPATH}}"],
+    "rs|py|js|ts": ["vim {{FILEPATH}}", "nano {{FILEPATH}}"],
+    "md": ["vim {{FILEPATH}}"]
   }
 }
 ```
@@ -102,14 +102,14 @@ Edit `~/.cokacdir/settings.json` and add the `extension_handler` section:
 | `"jpg\|jpeg\|png"` | Pipe-separated extensions (case-insensitive) |
 | `["cmd1", "cmd2"]` | Array of commands (fallback order) |
 | `{{FILEPATH}}` | Placeholder replaced with actual file path |
-| `@` prefix | Terminal mode for TUI apps (vim, nano, etc.) |
+| `@` prefix | Background mode for GUI apps (evince, feh, vlc) |
 
 ### Execution Modes
 
 | Mode | Prefix | Behavior | Use Case |
 |------|--------|----------|----------|
-| Background | (none) | Launches program and returns immediately | GUI apps (feh, vlc, evince) |
-| Terminal | `@` | Suspends COKACDIR, runs program, restores on exit | TUI apps (vim, nano, less) |
+| Foreground | (none) | Suspends COKACDIR, runs program, restores on exit | TUI apps (vim, nano, less) |
+| Background | `@` | Launches program and returns immediately | GUI apps (feh, vlc, evince) |
 
 ### Fallback Mechanism
 
@@ -127,6 +127,22 @@ Commands are tried in order. If the first command fails, the next one is attempt
 2. If `feh` fails → try `eog`
 3. If `eog` fails → try `xdg-open`
 4. If all fail → show error dialog
+
+### Interactive Handler Setup
+
+Press `u` on any file to open the handler setup dialog:
+
+| Mode | Condition | Description |
+|------|-----------|-------------|
+| **Set Handler** | No handler exists | Configure a new handler for the extension |
+| **Edit Handler** | Handler exists | Modify or remove the existing handler |
+
+**Actions:**
+- Enter command and press `Enter` → Save handler and execute
+- Leave empty and press `Enter` → Remove handler (Edit mode only)
+- Press `Esc` → Cancel without changes
+
+**Note:** When opening a binary file with no handler configured, the Set Handler dialog appears automatically.
 
 ### Examples
 
@@ -160,23 +176,23 @@ Commands are tried in order. If the first command fails, the next one is attempt
 }
 ```
 
-#### Text Editor (Terminal Mode)
+#### Text Editor (Foreground Mode)
 
 ```json
 {
   "extension_handler": {
-    "txt|md|rst": ["@vim {{FILEPATH}}"],
-    "rs|py|js|ts|go|c|cpp|h": ["@vim {{FILEPATH}}", "code {{FILEPATH}}"]
+    "txt|md|rst": ["vim {{FILEPATH}}"],
+    "rs|py|js|ts|go|c|cpp|h": ["vim {{FILEPATH}}", "@code {{FILEPATH}}"]
   }
 }
 ```
 
-#### Open with VS Code
+#### Open with VS Code (Background)
 
 ```json
 {
   "extension_handler": {
-    "rs|py|js|ts|json|yaml|toml": ["code {{FILEPATH}}"]
+    "rs|py|js|ts|json|yaml|toml": ["@code {{FILEPATH}}"]
   }
 }
 ```
@@ -198,12 +214,12 @@ Commands are tried in order. If the first command fails, the next one is attempt
     "name": "dark"
   },
   "extension_handler": {
-    "jpg|jpeg|png|gif|webp|bmp": ["feh {{FILEPATH}}", "eog {{FILEPATH}}"],
-    "mp4|avi|mkv|webm|mov": ["vlc {{FILEPATH}}"],
-    "pdf": ["evince {{FILEPATH}}"],
-    "txt|md": ["@vim {{FILEPATH}}"],
-    "rs|py|js|ts": ["@vim {{FILEPATH}}", "code {{FILEPATH}}"],
-    "html": ["firefox {{FILEPATH}}", "xdg-open {{FILEPATH}}"]
+    "jpg|jpeg|png|gif|webp|bmp": ["@feh {{FILEPATH}}", "@eog {{FILEPATH}}"],
+    "mp4|avi|mkv|webm|mov": ["@vlc {{FILEPATH}}"],
+    "pdf": ["@evince {{FILEPATH}}"],
+    "txt|md": ["vim {{FILEPATH}}"],
+    "rs|py|js|ts": ["vim {{FILEPATH}}", "@code {{FILEPATH}}"],
+    "html": ["@firefox {{FILEPATH}}", "@xdg-open {{FILEPATH}}"]
   }
 }
 ```
@@ -258,6 +274,7 @@ Quickly navigate to frequently used directories.
 | `r` | Rename |
 | `t` | Create tar archive |
 | `f` | Find/Search files |
+| `u` | Set/Edit file handler |
 
 ### Clipboard Operations
 

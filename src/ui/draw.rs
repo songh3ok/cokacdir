@@ -259,6 +259,7 @@ fn draw_function_bar(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         ("x", "del "),
         ("r", "en "),
         ("t", "ar "),
+        ("u", "hnd "),
         ("f", "ind "),
         (".", "AI "),
         ("p", "roc "),
