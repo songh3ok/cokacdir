@@ -6,18 +6,21 @@ use std::fs::OpenOptions;
 use regex::Regex;
 use serde_json::Value;
 
-/// Debug logging helper (disabled)
-#[allow(unused_variables)]
-fn debug_log(_msg: &str) {
-    // Disabled - uncomment below to enable debug logging
-    // if let Ok(mut file) = OpenOptions::new()
-    //     .create(true)
-    //     .append(true)
-    //     .open("./debug.log")
-    // {
-    //     let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
-    //     let _ = writeln!(file, "[{}] [claude] {}", timestamp, _msg);
-    // }
+/// Debug logging helper (ENABLED for investigation)
+fn debug_log(msg: &str) {
+    if let Some(home) = dirs::home_dir() {
+        let debug_dir = home.join(".cokacdir").join("debug");
+        let _ = std::fs::create_dir_all(&debug_dir);
+        let log_path = debug_dir.join("claude.log");
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+        {
+            let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
+            let _ = writeln!(file, "[{}] {}", timestamp, msg);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +42,8 @@ pub enum StreamMessage {
     ToolUse { name: String, input: String },
     /// Tool execution result
     ToolResult { content: String, is_error: bool },
+    /// Background task notification
+    TaskNotification { task_id: String, status: String, summary: String },
     /// Completion
     Done { result: String, session_id: Option<String> },
     /// Error
@@ -238,10 +243,15 @@ pub fn execute_command_streaming(
     working_dir: &str,
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
+    debug_log("========================================");
     debug_log("=== execute_command_streaming START ===");
-    debug_log(&format!("prompt: {}", &prompt[..prompt.len().min(100)]));
+    debug_log("========================================");
+    debug_log(&format!("prompt_len: {} chars", prompt.len()));
+    let prompt_preview: String = prompt.chars().take(200).collect();
+    debug_log(&format!("prompt_preview: {:?}", prompt_preview));
     debug_log(&format!("session_id: {:?}", session_id));
     debug_log(&format!("working_dir: {}", working_dir));
+    debug_log(&format!("timestamp: {:?}", std::time::SystemTime::now()));
 
     let mut args = vec![
         "-p".to_string(),
@@ -289,7 +299,21 @@ IMPORTANT: Format your responses using Markdown for better readability:
         args.push(sid.to_string());
     }
 
-    debug_log("Spawning claude process...");
+    debug_log("--- Spawning claude process ---");
+    debug_log(&format!("Command: claude"));
+    debug_log(&format!("Args count: {}", args.len()));
+    for (i, arg) in args.iter().enumerate() {
+        if arg.len() > 100 {
+            debug_log(&format!("  arg[{}]: {}... (truncated, {} chars total)", i, &arg[..100], arg.len()));
+        } else {
+            debug_log(&format!("  arg[{}]: {}", i, arg));
+        }
+    }
+    debug_log("Env: CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000");
+    debug_log("Env: BASH_DEFAULT_TIMEOUT_MS=86400000");
+    debug_log("Env: BASH_MAX_TIMEOUT_MS=86400000");
+
+    let spawn_start = std::time::Instant::now();
     let mut child = Command::new("claude")
         .args(&args)
         .current_dir(working_dir)
@@ -301,34 +325,45 @@ IMPORTANT: Format your responses using Markdown for better readability:
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| {
-            debug_log(&format!("ERROR: Failed to spawn: {}", e));
+            debug_log(&format!("ERROR: Failed to spawn after {:?}: {}", spawn_start.elapsed(), e));
             format!("Failed to start Claude: {}. Is Claude CLI installed?", e)
         })?;
-    debug_log("Claude process spawned successfully");
+    debug_log(&format!("Claude process spawned successfully in {:?}, pid={:?}", spawn_start.elapsed(), child.id()));
 
     // Write prompt to stdin
     if let Some(mut stdin) = child.stdin.take() {
-        debug_log("Writing prompt to stdin...");
-        let _ = stdin.write_all(prompt.as_bytes());
-        debug_log("Prompt written to stdin");
+        debug_log(&format!("Writing prompt to stdin ({} bytes)...", prompt.len()));
+        let write_start = std::time::Instant::now();
+        let write_result = stdin.write_all(prompt.as_bytes());
+        debug_log(&format!("stdin.write_all completed in {:?}, result={:?}", write_start.elapsed(), write_result.is_ok()));
+        // stdin is dropped here, which closes it - this signals end of input to claude
+        debug_log("stdin handle dropped (closed)");
+    } else {
+        debug_log("WARNING: Could not get stdin handle!");
     }
 
     // Read stdout line by line for streaming
+    debug_log("Taking stdout handle...");
     let stdout = child.stdout.take()
         .ok_or_else(|| {
             debug_log("ERROR: Failed to capture stdout");
             "Failed to capture stdout".to_string()
         })?;
     let reader = BufReader::new(stdout);
-    debug_log("Started reading stdout...");
+    debug_log("BufReader created, ready to read lines...");
 
     let mut last_session_id: Option<String> = None;
     let mut final_result: Option<String> = None;
     let mut line_count = 0;
 
+    debug_log("Entering lines loop - will block until first line arrives...");
     for line in reader.lines() {
+        debug_log(&format!("Line {} - read started", line_count + 1));
         let line = match line {
-            Ok(l) => l,
+            Ok(l) => {
+                debug_log(&format!("Line {} - read completed: {} chars", line_count + 1, l.len()));
+                l
+            },
             Err(e) => {
                 debug_log(&format!("ERROR: Failed to read line: {}", e));
                 let _ = sender.send(StreamMessage::Error {
@@ -346,77 +381,113 @@ IMPORTANT: Format your responses using Markdown for better readability:
             continue;
         }
 
+        let line_preview: String = line.chars().take(200).collect();
+        debug_log(&format!("  Raw line preview: {}", line_preview));
+
         if let Ok(json) = serde_json::from_str::<Value>(&line) {
             let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
-            debug_log(&format!("  JSON type: {}", msg_type));
+            let msg_subtype = json.get("subtype").and_then(|v| v.as_str()).unwrap_or("-");
+            debug_log(&format!("  JSON parsed: type={}, subtype={}", msg_type, msg_subtype));
 
+            // Log more details for specific message types
+            if msg_type == "assistant" {
+                if let Some(content) = json.get("message").and_then(|m| m.get("content")) {
+                    debug_log(&format!("  Assistant content array: {}", content));
+                }
+            }
+
+            debug_log("  Calling parse_stream_message...");
             if let Some(msg) = parse_stream_message(&json) {
-                debug_log(&format!("  Parsed message: {:?}", std::mem::discriminant(&msg)));
+                debug_log(&format!("  Parsed message variant: {:?}", std::mem::discriminant(&msg)));
 
                 // Track session_id and final result for Done message
                 match &msg {
                     StreamMessage::Init { session_id } => {
-                        debug_log(&format!("  Init with session_id: {}", session_id));
+                        debug_log(&format!("  >>> Init: session_id={}", session_id));
                         last_session_id = Some(session_id.clone());
                     }
                     StreamMessage::Text { content } => {
-                        debug_log(&format!("  Text content: {} chars", content.len()));
+                        let preview: String = content.chars().take(100).collect();
+                        debug_log(&format!("  >>> Text: {} chars, preview: {:?}", content.len(), preview));
                     }
-                    StreamMessage::ToolUse { name, .. } => {
-                        debug_log(&format!("  ToolUse: {}", name));
+                    StreamMessage::ToolUse { name, input } => {
+                        let input_preview: String = input.chars().take(200).collect();
+                        debug_log(&format!("  >>> ToolUse: name={}, input_preview={:?}", name, input_preview));
                     }
-                    StreamMessage::ToolResult { is_error, .. } => {
-                        debug_log(&format!("  ToolResult: is_error={}", is_error));
+                    StreamMessage::ToolResult { content, is_error } => {
+                        let content_preview: String = content.chars().take(200).collect();
+                        debug_log(&format!("  >>> ToolResult: is_error={}, content_len={}, preview={:?}",
+                            is_error, content.len(), content_preview));
                     }
                     StreamMessage::Done { result, session_id } => {
-                        debug_log(&format!("  Done: result={} chars, session_id={:?}", result.len(), session_id));
+                        let result_preview: String = result.chars().take(100).collect();
+                        debug_log(&format!("  >>> Done: result_len={}, session_id={:?}, preview={:?}",
+                            result.len(), session_id, result_preview));
                         final_result = Some(result.clone());
                         if session_id.is_some() {
                             last_session_id = session_id.clone();
                         }
                     }
                     StreamMessage::Error { message } => {
-                        debug_log(&format!("  Error: {}", message));
+                        debug_log(&format!("  >>> Error: {}", message));
+                    }
+                    StreamMessage::TaskNotification { task_id, status, summary } => {
+                        debug_log(&format!("  >>> TaskNotification: task_id={}, status={}, summary={}", task_id, status, summary));
                     }
                 }
 
                 // Send message to channel
                 debug_log("  Sending message to channel...");
-                if sender.send(msg).is_err() {
+                let send_result = sender.send(msg);
+                if send_result.is_err() {
                     debug_log("  ERROR: Channel send failed (receiver dropped)");
                     break;
                 }
-                debug_log("  Message sent successfully");
+                debug_log("  Message sent to channel successfully");
             } else {
-                debug_log("  (parse_stream_message returned None)");
+                debug_log(&format!("  parse_stream_message returned None for type={}", msg_type));
             }
         } else {
-            debug_log(&format!("  (not valid JSON): {}", &line[..line.len().min(100)]));
+            let invalid_preview: String = line.chars().take(200).collect();
+            debug_log(&format!("  NOT valid JSON: {}", invalid_preview));
         }
     }
 
-    debug_log(&format!("Finished reading stdout. Total lines: {}", line_count));
+    debug_log("--- Exited lines loop ---");
+    debug_log(&format!("Total lines read: {}", line_count));
+    debug_log(&format!("final_result present: {}", final_result.is_some()));
+    debug_log(&format!("last_session_id: {:?}", last_session_id));
 
     // Wait for process to finish
-    debug_log("Waiting for process to finish...");
+    debug_log("Waiting for child process to finish (child.wait())...");
+    let wait_start = std::time::Instant::now();
     let status = child.wait().map_err(|e| {
-        debug_log(&format!("ERROR: Process wait failed: {}", e));
+        debug_log(&format!("ERROR: Process wait failed after {:?}: {}", wait_start.elapsed(), e));
         format!("Process error: {}", e)
     })?;
-    debug_log(&format!("Process finished with status: {:?}", status));
+    debug_log(&format!("Process finished in {:?}, status: {:?}, exit_code: {:?}",
+        wait_start.elapsed(), status, status.code()));
 
     // If we didn't get a proper Done message, send one now
     if final_result.is_none() {
-        let _ = sender.send(StreamMessage::Done {
+        debug_log("No Done message received, sending synthetic Done message...");
+        let send_result = sender.send(StreamMessage::Done {
             result: String::new(),
-            session_id: last_session_id,
+            session_id: last_session_id.clone(),
         });
+        debug_log(&format!("Synthetic Done message sent, result={:?}", send_result.is_ok()));
+    } else {
+        debug_log("Done message was already received, not sending synthetic one");
     }
 
     if !status.success() {
+        debug_log(&format!("ERROR: Process failed with exit code {:?}", status.code()));
         return Err(format!("Process exited with code {:?}", status.code()));
     }
 
+    debug_log("========================================");
+    debug_log("=== execute_command_streaming END (success) ===");
+    debug_log("========================================");
     Ok(())
 }
 
@@ -427,12 +498,29 @@ fn parse_stream_message(json: &Value) -> Option<StreamMessage> {
     match msg_type {
         "system" => {
             // {"type":"system","subtype":"init","session_id":"..."}
+            // {"type":"system","subtype":"task_notification","task_id":"...","status":"...","summary":"..."}
             let subtype = json.get("subtype").and_then(|v| v.as_str())?;
-            if subtype == "init" {
-                let session_id = json.get("session_id")?.as_str()?.to_string();
-                Some(StreamMessage::Init { session_id })
-            } else {
-                None
+            match subtype {
+                "init" => {
+                    let session_id = json.get("session_id")?.as_str()?.to_string();
+                    Some(StreamMessage::Init { session_id })
+                }
+                "task_notification" => {
+                    let task_id = json.get("task_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let status = json.get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let summary = json.get("summary")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    Some(StreamMessage::TaskNotification { task_id, status, summary })
+                }
+                _ => None
             }
         }
         "assistant" => {
@@ -460,16 +548,24 @@ fn parse_stream_message(json: &Value) -> Option<StreamMessage> {
             None
         }
         "user" => {
-            // {"type":"user","message":{"content":[{"type":"tool_result","content":"..."}]}}
+            // {"type":"user","message":{"content":[{"type":"tool_result","content":"..." or [array]}]}}
             let content = json.get("message")?.get("content")?.as_array()?;
 
             for item in content {
                 let item_type = item.get("type")?.as_str()?;
                 if item_type == "tool_result" {
-                    let content_text = item.get("content")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
+                    // content can be a string or an array of text items
+                    let content_text = if let Some(s) = item.get("content").and_then(|v| v.as_str()) {
+                        s.to_string()
+                    } else if let Some(arr) = item.get("content").and_then(|v| v.as_array()) {
+                        // Extract text from array: [{"type":"text","text":"..."},...]
+                        arr.iter()
+                            .filter_map(|v| v.get("text").and_then(|t| t.as_str()))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    } else {
+                        String::new()
+                    };
                     let is_error = item.get("is_error")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);

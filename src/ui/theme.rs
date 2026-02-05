@@ -2,7 +2,7 @@ use ratatui::style::{Color, Modifier, Style};
 use supports_color::Stream;
 
 /// Default theme name used throughout the application
-pub const DEFAULT_THEME_NAME: &str = "dark";
+pub const DEFAULT_THEME_NAME: &str = "dawn of coding";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 아이콘 문자
@@ -362,10 +362,10 @@ pub struct AIScreenColors {
     pub error_text: Color,                  // "Claude CLI not available"
 
     // === 도구 사용 표시 ===
-    pub tool_use_prefix: Color,             // "⚙ " 도구 사용 프리픽스
+    pub tool_use_prefix: Color,             // "[]" 도구 사용 브래킷
     pub tool_use_name: Color,               // 도구 이름 (Bash, Write 등)
     pub tool_use_input: Color,              // 도구 입력 내용
-    pub tool_result_prefix: Color,          // "→ " 도구 결과 프리픽스
+    pub tool_result_prefix: Color,          // "->" 도구 결과 프리픽스
     pub tool_result_text: Color,            // 도구 결과 텍스트
 
     // === 하단 도움말 ===
@@ -561,7 +561,7 @@ pub struct Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::dark()
+        Self::dawn_of_coding()
     }
 }
 
@@ -577,7 +577,8 @@ impl Theme {
         match name {
             "light" => Self::light(),
             "dark" => Self::dark(),
-            _ => Self::dark(),
+            "dawn of coding" => Self::dawn_of_coding(),
+            _ => Self::dawn_of_coding(),
         }
     }
 
@@ -869,10 +870,10 @@ impl Theme {
             error_text: Color::Indexed(198),            // 에러 텍스트 (panel.marked_text)
 
             // === 도구 사용 표시 ===
-            tool_use_prefix: Color::Indexed(136),       // "⚙ " 도구 프리픽스 (황색)
+            tool_use_prefix: Color::Indexed(136),       // "[]" 도구 브래킷 (황색)
             tool_use_name: Color::Indexed(67),          // 도구 이름 (디렉토리 색상)
             tool_use_input: Color::Indexed(243),        // 도구 입력 (일반 텍스트)
-            tool_result_prefix: Color::Indexed(34),     // "→ " 결과 프리픽스 (녹색)
+            tool_result_prefix: Color::Indexed(34),     // "->" 결과 프리픽스 (녹색)
             tool_result_text: Color::Indexed(243),      // 결과 텍스트 (일반 텍스트)
 
             // === 하단 도움말 ===
@@ -1263,10 +1264,10 @@ impl Theme {
             processing_spinner: Color::Indexed(117),
             processing_text: Color::Indexed(245),
             error_text: Color::Indexed(204),
-            tool_use_prefix: Color::Indexed(179),       // "⚙ " 도구 프리픽스 (황색)
+            tool_use_prefix: Color::Indexed(179),       // "[]" 도구 브래킷 (황색)
             tool_use_name: Color::Indexed(81),          // 도구 이름 (시안)
             tool_use_input: Color::Indexed(252),        // 도구 입력 (일반 텍스트)
-            tool_result_prefix: Color::Indexed(114),    // "→ " 결과 프리픽스 (녹색)
+            tool_result_prefix: Color::Indexed(114),    // "->" 결과 프리픽스 (녹색)
             tool_result_text: Color::Indexed(252),      // 결과 텍스트 (일반 텍스트)
             footer_key: Color::Indexed(117),
             footer_text: Color::Indexed(245),
@@ -1395,6 +1396,363 @@ impl Theme {
         }
     }
 
+    /// Dawn of Coding theme - 어두운 파스텔톤의 새벽 코딩 테마
+    pub fn dawn_of_coding() -> Self {
+        // 기본 팔레트 정의 (어두운 파스텔톤)
+        let palette = Palette {
+            bg: Color::Indexed(234),
+            bg_alt: Color::Indexed(235),
+            fg: Color::Indexed(188),
+            fg_dim: Color::Indexed(102),
+            fg_strong: Color::Indexed(195),
+            fg_inverse: Color::Indexed(234),
+            accent: Color::Indexed(110),
+            shortcut: Color::Indexed(146),
+            positive: Color::Indexed(108),
+            highlight: Color::Indexed(174),
+        };
+
+        let state = StateColors {
+            success: Color::Indexed(108),
+            warning: Color::Indexed(180),
+            error: Color::Indexed(167),
+            info: Color::Indexed(110),
+        };
+
+        let panel = PanelColors {
+            bg: Color::Indexed(234),
+            border: Color::Indexed(102),
+            border_active: Color::Indexed(146),
+            header_bg: Color::Indexed(235),
+            header_bg_active: Color::Indexed(236),
+            header_text: Color::Indexed(145),
+            header_text_active: Color::Indexed(195),
+            file_text: Color::Indexed(188),
+            directory_text: Color::Indexed(110),
+            symlink_text: Color::Indexed(73),
+            selected_bg: Color::Indexed(146),
+            selected_text: Color::Indexed(234),
+            marked_text: Color::Indexed(174),
+            size_text: Color::Indexed(102),
+            date_text: Color::Indexed(102),
+        };
+
+        let header = HeaderColors {
+            bg: Color::Indexed(234),
+            text: Color::Indexed(188),
+            title: Color::Indexed(146),
+        };
+
+        let status_bar = StatusBarColors {
+            bg: Color::Indexed(235),
+            text: Color::Indexed(188),
+            text_dim: Color::Indexed(102),
+        };
+
+        let function_bar = FunctionBarColors {
+            bg: Color::Indexed(234),
+            key: Color::Indexed(146),
+            label: Color::Indexed(102),
+        };
+
+        let message = MessageColors {
+            bg: Color::Indexed(235),
+            text: Color::Indexed(174),
+        };
+
+        let dialog = DialogColors {
+            bg: Color::Indexed(235),
+            border: Color::Indexed(146),
+            title: Color::Indexed(195),
+            text: Color::Indexed(188),
+            text_dim: Color::Indexed(102),
+            message_text: Color::Indexed(188),
+            input_text: Color::Indexed(188),
+            input_cursor_fg: Color::Indexed(234),
+            input_cursor_bg: Color::Indexed(146),
+            input_prompt: Color::Indexed(110),
+            button_text: Color::Indexed(102),
+            button_selected_bg: Color::Indexed(60),
+            button_selected_text: Color::Indexed(195),
+            autocomplete_bg: Color::Indexed(235),
+            autocomplete_text: Color::Indexed(188),
+            autocomplete_directory_text: Color::Indexed(110),
+            autocomplete_selected_bg: Color::Indexed(60),
+            autocomplete_selected_text: Color::Indexed(195),
+            autocomplete_scroll_info: Color::Indexed(102),
+            preview_suffix_text: Color::Indexed(102),
+            help_key_text: Color::Indexed(146),
+            help_label_text: Color::Indexed(102),
+            progress_label_text: Color::Indexed(102),
+            progress_value_text: Color::Indexed(188),
+            progress_bar_fill: Color::Indexed(108),
+            progress_bar_empty: Color::Indexed(239),
+            progress_percent_text: Color::Indexed(188),
+            conflict_filename_text: Color::Indexed(174),
+            conflict_count_text: Color::Indexed(102),
+            conflict_shortcut_text: Color::Indexed(110),
+            tar_exclude_title: Color::Indexed(195),
+            tar_exclude_border: Color::Indexed(146),
+            tar_exclude_bg: Color::Indexed(235),
+            tar_exclude_message_text: Color::Indexed(188),
+            tar_exclude_path_text: Color::Indexed(180),
+            tar_exclude_scroll_info: Color::Indexed(102),
+            tar_exclude_button_text: Color::Indexed(102),
+            tar_exclude_button_selected_bg: Color::Indexed(60),
+            tar_exclude_button_selected_text: Color::Indexed(195),
+        };
+
+        let confirm_dialog = ConfirmDialogColors {
+            bg: Color::Indexed(236),
+            border: Color::Indexed(146),
+            title: Color::Indexed(195),
+            message_text: Color::Indexed(188),
+            button_text: Color::Indexed(102),
+            button_selected_bg: Color::Indexed(60),
+            button_selected_text: Color::Indexed(195),
+        };
+
+        let settings = SettingsColors {
+            bg: Color::Indexed(235),
+            border: Color::Indexed(146),
+            title: Color::Indexed(195),
+            label_text: Color::Indexed(188),
+            prompt: Color::Indexed(110),
+            value_text: Color::Indexed(234),
+            value_bg: Color::Indexed(146),
+            help_key: Color::Indexed(146),
+            help_text: Color::Indexed(102),
+        };
+
+        let editor = EditorColors {
+            bg: Color::Indexed(234),
+            border: Color::Indexed(146),
+            header_bg: Color::Indexed(235),
+            header_text: Color::Indexed(145),
+            header_info: Color::Indexed(102),
+            line_number: Color::Indexed(239),
+            text: Color::Indexed(188),
+            cursor: Color::Indexed(146),
+            selection_bg: Color::Indexed(60),
+            selection_text: Color::Indexed(195),
+            match_bg: Color::Indexed(95),
+            match_current_bg: Color::Indexed(132),
+            bracket_match: Color::Indexed(110),
+            modified_mark: Color::Indexed(174),
+            footer_bg: Color::Indexed(235),
+            footer_key: Color::Indexed(146),
+            footer_text: Color::Indexed(102),
+            find_input_text: Color::Indexed(188),
+            find_option: Color::Indexed(102),
+            find_option_active: Color::Indexed(110),
+        };
+
+        let syntax = SyntaxColors {
+            keyword: Color::Indexed(139),
+            type_name: Color::Indexed(110),
+            string: Color::Indexed(108),
+            number: Color::Indexed(180),
+            comment: Color::Indexed(59),
+            operator: Color::Indexed(188),
+            function: Color::Indexed(222),
+            macro_name: Color::Indexed(139),
+            attribute: Color::Indexed(102),
+            variable: Color::Indexed(188),
+            constant: Color::Indexed(174),
+            bracket: Color::Indexed(145),
+            normal: Color::Indexed(188),
+        };
+
+        let viewer = ViewerColors {
+            bg: Color::Indexed(234),
+            border: Color::Indexed(146),
+            header_text: Color::Indexed(145),
+            line_number: Color::Indexed(239),
+            text: Color::Indexed(188),
+            bookmark_indicator: Color::Indexed(110),
+            search_input_text: Color::Indexed(188),
+            search_cursor_fg: Color::Indexed(234),
+            search_cursor_bg: Color::Indexed(146),
+            search_match_current_bg: Color::Indexed(60),
+            search_match_current_fg: Color::Indexed(195),
+            search_match_other_bg: Color::Indexed(239),
+            search_match_other_fg: Color::Indexed(188),
+            search_info: Color::Indexed(102),
+            hex_offset: Color::Indexed(102),
+            hex_bytes: Color::Indexed(188),
+            hex_ascii: Color::Indexed(195),
+            wrap_indicator: Color::Indexed(239),
+            footer_key: Color::Indexed(146),
+            footer_text: Color::Indexed(102),
+        };
+
+        let process_manager = ProcessManagerColors {
+            bg: Color::Indexed(234),
+            border: Color::Indexed(146),
+            header_text: Color::Indexed(145),
+            column_header: Color::Indexed(110),
+            text: Color::Indexed(188),
+            selected_bg: Color::Indexed(60),
+            selected_text: Color::Indexed(195),
+            cpu_high: Color::Indexed(167),
+            mem_high: Color::Indexed(167),
+            confirm_text: Color::Indexed(174),
+            footer_key: Color::Indexed(146),
+            footer_text: Color::Indexed(102),
+        };
+
+        let ai_screen = AIScreenColors {
+            bg: Color::Indexed(234),
+            history_border: Color::Indexed(146),
+            history_title: Color::Indexed(195),
+            history_placeholder: Color::Indexed(102),
+            history_scroll_info: Color::Indexed(102),
+            user_prefix: Color::Indexed(110),
+            assistant_prefix: Color::Indexed(139),
+            error_prefix: Color::Indexed(167),
+            system_prefix: Color::Indexed(102),
+            message_text: Color::Indexed(188),
+            input_border: Color::Indexed(146),
+            input_prompt: Color::Indexed(110),
+            input_text: Color::Indexed(188),
+            input_cursor_fg: Color::Indexed(234),
+            input_cursor_bg: Color::Indexed(146),
+            input_placeholder: Color::Indexed(102),
+            processing_spinner: Color::Indexed(110),
+            processing_text: Color::Indexed(102),
+            error_text: Color::Indexed(167),
+            tool_use_prefix: Color::Indexed(180),
+            tool_use_name: Color::Indexed(110),
+            tool_use_input: Color::Indexed(188),
+            tool_result_prefix: Color::Indexed(108),
+            tool_result_text: Color::Indexed(188),
+            footer_key: Color::Indexed(146),
+            footer_text: Color::Indexed(102),
+        };
+
+        let system_info = SystemInfoColors {
+            bg: Color::Indexed(234),
+            border: Color::Indexed(146),
+            section_title: Color::Indexed(110),
+            label: Color::Indexed(188),
+            value: Color::Indexed(188),
+            bar_fill: Color::Indexed(108),
+            bar_empty: Color::Indexed(239),
+            usage_low: Color::Indexed(108),
+            usage_medium: Color::Indexed(180),
+            usage_high: Color::Indexed(167),
+            tab_active: Color::Indexed(195),
+            disk_header: Color::Indexed(110),
+            disk_text: Color::Indexed(188),
+            selected_bg: Color::Indexed(60),
+            selected_text: Color::Indexed(195),
+            footer_key: Color::Indexed(146),
+            footer_text: Color::Indexed(102),
+        };
+
+        let search_result = SearchResultColors {
+            bg: Color::Indexed(234),
+            border: Color::Indexed(146),
+            header_text: Color::Indexed(145),
+            column_header: Color::Indexed(110),
+            column_header_dim: Color::Indexed(102),
+            directory_text: Color::Indexed(195),
+            file_text: Color::Indexed(188),
+            selected_bg: Color::Indexed(60),
+            selected_text: Color::Indexed(195),
+            match_highlight: Color::Indexed(174),
+            path_text: Color::Indexed(102),
+            footer_key: Color::Indexed(146),
+            footer_text: Color::Indexed(102),
+        };
+
+        let image_viewer = ImageViewerColors {
+            bg: Color::Indexed(234),
+            border: Color::Indexed(146),
+            title_text: Color::Indexed(145),
+            loading_spinner: Color::Indexed(110),
+            loading_text: Color::Indexed(102),
+            error_text: Color::Indexed(167),
+            hint_text: Color::Indexed(102),
+            footer_key: Color::Indexed(146),
+            footer_text: Color::Indexed(102),
+            footer_separator: Color::Indexed(102),
+        };
+
+        let file_info = FileInfoColors {
+            bg: Color::Indexed(234),
+            border: Color::Indexed(146),
+            title: Color::Indexed(195),
+            label: Color::Indexed(102),
+            value: Color::Indexed(188),
+            value_name: Color::Indexed(110),
+            value_path: Color::Indexed(188),
+            value_type: Color::Indexed(188),
+            value_size: Color::Indexed(108),
+            value_permission: Color::Indexed(188),
+            value_owner: Color::Indexed(188),
+            value_date: Color::Indexed(188),
+            calculating_spinner: Color::Indexed(110),
+            calculating_text: Color::Indexed(110),
+            error_text: Color::Indexed(167),
+            hint_text: Color::Indexed(102),
+        };
+
+        let help = HelpColors {
+            bg: Color::Indexed(234),
+            border: Color::Indexed(146),
+            title: Color::Indexed(195),
+            section_title: Color::Indexed(110),
+            section_decorator: Color::Indexed(239),
+            key: Color::Indexed(146),
+            key_highlight: Color::Indexed(174),
+            description: Color::Indexed(188),
+            hint_text: Color::Indexed(102),
+        };
+
+        let advanced_search = AdvancedSearchColors {
+            bg: Color::Indexed(234),
+            border: Color::Indexed(146),
+            title: Color::Indexed(195),
+            label: Color::Indexed(188),
+            input_text: Color::Indexed(188),
+            input_cursor: Color::Indexed(146),
+            field_bracket: Color::Indexed(110),
+            checkbox_checked: Color::Indexed(108),
+            checkbox_unchecked: Color::Indexed(102),
+            button_text: Color::Indexed(102),
+            button_selected_bg: Color::Indexed(60),
+            button_selected_text: Color::Indexed(195),
+            footer_key: Color::Indexed(146),
+            footer_text: Color::Indexed(102),
+        };
+
+        Self {
+            palette,
+            state,
+            panel,
+            header,
+            status_bar,
+            function_bar,
+            message,
+            dialog,
+            confirm_dialog,
+            settings,
+            editor,
+            syntax,
+            viewer,
+            process_manager,
+            ai_screen,
+            system_info,
+            search_result,
+            image_viewer,
+            file_info,
+            help,
+            advanced_search,
+            chars: ThemeChars::default(),
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // 스타일 헬퍼 메서드
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1480,9 +1838,15 @@ impl Theme {
 
     /// 테마 이름 반환
     pub fn name(&self) -> &str {
-        // light와 dark 테마를 구분하기 위해 palette.bg 값으로 판단
-        // light: 255, dark: 235
-        if Self::color_index(self.palette.bg) >= 250 {
+        // 테마 구분: 색상 조합으로 판단
+        let bg = Self::color_index(self.palette.bg);
+        let accent = Self::color_index(self.palette.accent);
+        let shortcut = Self::color_index(self.palette.shortcut);
+
+        // dawn of coding: bg=234, accent=110, shortcut=146
+        if bg == 234 && accent == 110 && shortcut == 146 {
+            "dawn of coding"
+        } else if bg >= 250 {
             "light"
         } else {
             "dark"
@@ -1911,13 +2275,13 @@ impl Theme {
     "processing_text": {},
     "__error_text__": "에러 메시지 텍스트. API 오류, 연결 실패 등. state.error와 유사",
     "error_text": {},
-    "__tool_use_prefix__": "도구 사용 표시 접두사(⚙). AI가 도구를 사용할 때 표시. tool_use_name과 함께 도구 호출을 시각화",
+    "__tool_use_prefix__": "도구 사용 표시 브래킷([]). AI가 도구를 사용할 때 표시. tool_use_name과 함께 도구 호출을 시각화",
     "tool_use_prefix": {},
     "__tool_use_name__": "도구 이름 텍스트(Bash, Write, Read 등). tool_use_prefix 옆에 표시. 어떤 도구가 사용되는지 명확히 구분",
     "tool_use_name": {},
     "__tool_use_input__": "도구 입력 내용 텍스트. 도구에 전달되는 명령이나 파라미터. message_text와 유사하거나 약간 흐리게",
     "tool_use_input": {},
-    "__tool_result_prefix__": "도구 결과 표시 접두사(→). 도구 실행 결과 앞에 표시. tool_result_text와 함께 결과를 시각화",
+    "__tool_result_prefix__": "도구 결과 표시 접두사(->). 도구 실행 결과 앞에 표시. tool_result_text와 함께 결과를 시각화",
     "tool_result_prefix": {},
     "__tool_result_text__": "도구 실행 결과 텍스트. 명령 출력, 파일 내용 등. message_text와 유사",
     "tool_result_text": {},

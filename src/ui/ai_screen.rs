@@ -15,22 +15,24 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
-/// Debug logging helper (disabled)
-#[allow(unused_variables)]
-fn debug_log(_msg: &str) {
-    // Disabled - uncomment below to enable debug logging
-    // if let Ok(mut file) = OpenOptions::new()
-    //     .create(true)
-    //     .append(true)
-    //     .open("./debug.log")
-    // {
-    //     let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
-    //     let _ = writeln!(file, "[{}] [ai_screen] {}", timestamp, _msg);
-    // }
+/// Debug logging helper (ENABLED for investigation)
+fn debug_log(msg: &str) {
+    if let Some(home) = dirs::home_dir() {
+        let debug_dir = home.join(".cokacdir").join("debug");
+        let _ = std::fs::create_dir_all(&debug_dir);
+        let log_path = debug_dir.join("ai_screen.log");
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+        {
+            let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
+            let _ = writeln!(file, "[{}] {}", timestamp, msg);
+        }
+    }
 }
 
 use super::theme::Theme;
-use super::syntax::{Language, SyntaxHighlighter};
 use crate::services::claude::{self, StreamMessage};
 use crate::utils::markdown::{is_line_empty, render_markdown, MarkdownTheme};
 
@@ -109,6 +111,202 @@ fn normalize_empty_lines(text: &str) -> String {
     result_lines.join("\n")
 }
 
+/// Format tool use for display - extract key info only, exclude large content
+/// Returns a concise, readable summary without raw JSON
+fn format_tool_use(name: &str, input: &str) -> String {
+    let json: serde_json::Value = match serde_json::from_str(input) {
+        Ok(v) => v,
+        Err(_) => return input.chars().take(100).collect(),
+    };
+
+    match name {
+        "Bash" => {
+            // Show: command, description (optional)
+            let cmd = json.get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let desc = json.get("description")
+                .and_then(|v| v.as_str());
+            match desc {
+                Some(d) => format!("$ {}\n  ({})", cmd, d),
+                None => format!("$ {}", cmd),
+            }
+        }
+        "Read" => {
+            // Show: file_path
+            let path = json.get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            format!("file: {}", path)
+        }
+        "Write" => {
+            // Show: file_path only (exclude content - can be large)
+            let path = json.get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            format!("file: {}", path)
+        }
+        "Edit" => {
+            // Show: file_path only (exclude old_string, new_string - can be large)
+            let path = json.get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            format!("file: {}", path)
+        }
+        "Glob" => {
+            // Show: pattern, path (optional)
+            let pattern = json.get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let path = json.get("path")
+                .and_then(|v| v.as_str());
+            match path {
+                Some(p) => format!("pattern: {}  path: {}", pattern, p),
+                None => format!("pattern: {}", pattern),
+            }
+        }
+        "Grep" => {
+            // Show: pattern, path (optional), glob (optional)
+            let pattern = json.get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let path = json.get("path")
+                .and_then(|v| v.as_str());
+            let glob = json.get("glob")
+                .and_then(|v| v.as_str());
+            let mut result = format!("pattern: {}", pattern);
+            if let Some(p) = path {
+                result.push_str(&format!("  path: {}", p));
+            }
+            if let Some(g) = glob {
+                result.push_str(&format!("  glob: {}", g));
+            }
+            result
+        }
+        "Task" => {
+            // Show: description, subagent_type (exclude prompt - can be large)
+            let desc = json.get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let agent = json.get("subagent_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            format!("{} [{}]", desc, agent)
+        }
+        "WebFetch" => {
+            // Show: url (exclude prompt)
+            let url = json.get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            format!("url: {}", url)
+        }
+        "WebSearch" => {
+            // Show: query
+            let query = json.get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            format!("query: {}", query)
+        }
+        "NotebookEdit" => {
+            // Show: notebook_path, cell_type (exclude new_source - can be large)
+            let path = json.get("notebook_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let cell_type = json.get("cell_type")
+                .and_then(|v| v.as_str());
+            match cell_type {
+                Some(ct) => format!("notebook: {}  cell: {}", path, ct),
+                None => format!("notebook: {}", path),
+            }
+        }
+        "AskUserQuestion" => {
+            // Show: first question only
+            if let Some(questions) = json.get("questions").and_then(|v| v.as_array()) {
+                if let Some(first) = questions.first() {
+                    let q = first.get("question")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    return format!("Q: {}", q);
+                }
+            }
+            String::new()
+        }
+        "TaskCreate" | "TaskUpdate" | "TaskGet" | "TaskList" => {
+            // Show: subject or taskId
+            let subject = json.get("subject")
+                .and_then(|v| v.as_str());
+            let task_id = json.get("taskId")
+                .and_then(|v| v.as_str());
+            match (subject, task_id) {
+                (Some(s), _) => format!("subject: {}", s),
+                (_, Some(id)) => format!("taskId: {}", id),
+                _ => String::new(),
+            }
+        }
+        "Skill" => {
+            // Show: skill name, args
+            let skill = json.get("skill")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let args = json.get("args")
+                .and_then(|v| v.as_str());
+            match args {
+                Some(a) => format!("/{} {}", skill, a),
+                None => format!("/{}", skill),
+            }
+        }
+        "EnterPlanMode" | "ExitPlanMode" => {
+            // No parameters needed
+            String::new()
+        }
+        "TaskOutput" | "TaskStop" => {
+            // Show: task_id
+            let task_id = json.get("task_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            format!("task_id: {}", task_id)
+        }
+        "TodoWrite" => {
+            // Show: first todo content only (exclude full todos array)
+            if let Some(todos) = json.get("todos").and_then(|v| v.as_array()) {
+                let count = todos.len();
+                if let Some(first) = todos.first() {
+                    let content = first.get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let status = first.get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if count > 1 {
+                        return format!("[{}] {} (+{} more)", status, content, count - 1);
+                    } else {
+                        return format!("[{}] {}", status, content);
+                    }
+                }
+            }
+            String::new()
+        }
+        "ToolSearch" => {
+            // Show: query
+            let query = json.get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            format!("search: {}", query)
+        }
+        _ => {
+            // Unknown tool - show keys only (no values to avoid large content)
+            let keys: Vec<&str> = json.as_object()
+                .map(|obj| obj.keys().map(|k| k.as_str()).collect())
+                .unwrap_or_default();
+            if keys.is_empty() {
+                String::new()
+            } else {
+                format!("params: {}", keys.join(", "))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryItem {
     pub item_type: HistoryType,
@@ -121,7 +319,7 @@ pub enum HistoryType {
     Assistant,
     Error,
     System,
-    ToolUse,      // Tool usage display (e.g., "⚙ Bash")
+    ToolUse,      // Tool usage display (e.g., "[Bash]")
     ToolResult,   // Tool execution result
 }
 
@@ -183,8 +381,6 @@ impl AIScreenState {
     /// Add item to history with size limit to prevent memory exhaustion
     /// Also normalizes consecutive empty lines in content
     pub fn add_to_history(&mut self, item: HistoryItem) {
-        debug_log(&format!("add_to_history: type={:?}, content={} chars",
-            item.item_type, item.content.len()));
         // Remove oldest items if we're at the limit
         while self.history.len() >= MAX_HISTORY_ITEMS {
             self.history.remove(0);
@@ -195,7 +391,6 @@ impl AIScreenState {
             content: normalize_empty_lines(&item.content),
         };
         self.history.push(normalized_item);
-        debug_log(&format!("  -> history now has {} items", self.history.len()));
     }
 
     /// Validate session ID to prevent path injection attacks
@@ -340,13 +535,13 @@ impl AIScreenState {
         // Add warning message first
         state.history.push(HistoryItem {
             item_type: HistoryType::System,
-            content: "⚠ Warning: AI commands may execute real operations on your system. Please use with caution.".to_string(),
+            content: "[!] Warning: AI commands may execute real operations on your system. Please use with caution.".to_string(),
         });
 
         // Add restored session indicator
         state.history.push(HistoryItem {
             item_type: HistoryType::System,
-            content: "📂 Session restored from previous conversation".to_string(),
+            content: "Session restored from previous conversation".to_string(),
         });
 
         // Append loaded history
@@ -382,7 +577,7 @@ impl AIScreenState {
         // Add warning message as first line
         state.history.push(HistoryItem {
             item_type: HistoryType::System,
-            content: "⚠ Warning: AI commands may execute real operations on your system. Please use with caution.".to_string(),
+            content: "[!] Warning: AI commands may execute real operations on your system. Please use with caution.".to_string(),
         });
 
         if !claude::is_ai_supported() {
@@ -582,24 +777,30 @@ impl AIScreenState {
 
         // Check claude availability before actual API call
         if !self.claude_available {
-            debug_log("Claude not available, returning");
+            debug_log("submit: Claude not available, returning early");
             return;
         }
 
+        debug_log(&format!("submit: START - input_len={}, current_path={}", user_input.len(), self.current_path));
+        let input_preview: String = user_input.chars().take(100).collect();
+        debug_log(&format!("submit: user_input preview: {:?}", input_preview));
+
         // Add user message immediately
-        debug_log("Adding user message to history");
+        debug_log("submit: Adding user message to history");
         self.add_to_history(HistoryItem {
             item_type: HistoryType::User,
             content: user_input.clone(),
         });
+        debug_log(&format!("submit: History length after add: {}", self.history.len()));
 
         // Set processing state
         self.is_processing = true;
         self.streaming_buffer.clear();
-        debug_log("Set is_processing = true");
+        debug_log("submit: Set is_processing=true, cleared streaming_buffer");
 
         // Sanitize user input to prevent prompt injection
         let sanitized_input = sanitize_user_input(&user_input);
+        debug_log(&format!("submit: Sanitized input len={}", sanitized_input.len()));
 
         // Prepare context for async execution with clear boundaries
         let context_prompt = format!(
@@ -616,30 +817,44 @@ If the user asks to perform file operations, provide clear instructions.
 Keep responses concise and terminal-friendly.",
             self.current_path, sanitized_input
         );
+        debug_log(&format!("submit: Context prompt prepared, total len={}", context_prompt.len()));
 
         let session_id = self.session_id.clone();
         let current_path = self.current_path.clone();
+        debug_log(&format!("submit: session_id={:?}", session_id));
 
         // Create channel for streaming response
         let (tx, rx) = mpsc::channel();
         self.response_receiver = Some(rx);
-        debug_log("Created channel, spawning thread...");
+        debug_log("submit: Channel created, receiver stored");
 
         // Spawn thread to execute Claude command with streaming
+        debug_log("submit: Spawning worker thread...");
         thread::spawn(move || {
-            debug_log("Thread started, calling execute_command_streaming...");
-            if let Err(e) = claude::execute_command_streaming(
+            debug_log("submit:thread: === WORKER THREAD STARTED ===");
+            debug_log(&format!("submit:thread: Calling execute_command_streaming with path={}", current_path));
+            let start_time = std::time::Instant::now();
+
+            let result = claude::execute_command_streaming(
                 &context_prompt,
                 session_id.as_deref(),
                 &current_path,
                 tx.clone(),
-            ) {
-                debug_log(&format!("execute_command_streaming error: {}", e));
-                let _ = tx.send(StreamMessage::Error { message: e });
+            );
+
+            let elapsed = start_time.elapsed();
+            debug_log(&format!("submit:thread: execute_command_streaming returned after {:?}", elapsed));
+
+            if let Err(e) = result {
+                debug_log(&format!("submit:thread: ERROR from execute_command_streaming: {}", e));
+                let send_result = tx.send(StreamMessage::Error { message: e });
+                debug_log(&format!("submit:thread: Error message send result: {:?}", send_result.is_ok()));
+            } else {
+                debug_log("submit:thread: execute_command_streaming completed successfully");
             }
-            debug_log("Thread finished");
+            debug_log("submit:thread: === WORKER THREAD ENDING ===");
         });
-        debug_log("Thread spawned, submit() returning");
+        debug_log("submit: Worker thread spawned, submit() returning to caller");
     }
 
     /// Poll for streaming response from Claude
@@ -653,62 +868,47 @@ Keep responses concise and terminal-friendly.",
         let mut messages = Vec::new();
         let mut has_new_content = false;
         let mut channel_disconnected = false;
+        let mut processing_done = false;
 
         if let Some(ref receiver) = self.response_receiver {
             loop {
                 match receiver.try_recv() {
                     Ok(msg) => {
-                        debug_log(&format!("poll_response: received message: {:?}", std::mem::discriminant(&msg)));
                         messages.push(msg);
                     }
-                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Empty) => {
+                        break;
+                    }
                     Err(TryRecvError::Disconnected) => {
-                        debug_log("poll_response: channel disconnected");
                         channel_disconnected = true;
                         break;
                     }
                 }
             }
-        } else {
-            debug_log("poll_response: response_receiver is None but is_processing=true!");
         }
 
-        if !messages.is_empty() {
-            debug_log(&format!("poll_response: processing {} messages", messages.len()));
-        }
-
-        // Now process collected messages
+        // Now process ALL collected messages (don't return early)
         for msg in messages {
             match msg {
                 StreamMessage::Init { session_id } => {
-                    debug_log(&format!("Processing Init: session_id={}", session_id));
-                    self.session_id = Some(session_id);
+                    self.session_id = Some(session_id.clone());
                 }
                 StreamMessage::Text { content } => {
-                    debug_log(&format!("Processing Text: {} chars, buffer now {} chars", content.len(), self.streaming_buffer.len() + content.len()));
                     // Accumulate text in streaming buffer
                     self.streaming_buffer.push_str(&content);
                     self.update_streaming_history();
                     has_new_content = true;
                 }
                 StreamMessage::ToolUse { name, input } => {
-                    debug_log(&format!("Processing ToolUse: {}", name));
-                    // Only display Bash commands (other tools are hidden to keep UI clean)
-                    if name == "Bash" {
-                        // Extract command from JSON input
-                        let command = serde_json::from_str::<serde_json::Value>(&input)
-                            .ok()
-                            .and_then(|v| v.get("command").and_then(|c| c.as_str()).map(String::from))
-                            .unwrap_or_else(|| input.clone());
-                        self.add_to_history(HistoryItem {
-                            item_type: HistoryType::ToolUse,
-                            content: format!("{}\n{}", name, command),
-                        });
-                        has_new_content = true;
-                    }
+                    // Format tool use with simplified output (no raw JSON dump)
+                    let formatted_content = format_tool_use(&name, &input);
+                    self.add_to_history(HistoryItem {
+                        item_type: HistoryType::ToolUse,
+                        content: format!("{}\n{}", name, formatted_content),
+                    });
+                    has_new_content = true;
                 }
                 StreamMessage::ToolResult { content, is_error } => {
-                    debug_log(&format!("Processing ToolResult: {} chars, is_error={}", content.len(), is_error));
                     // Add tool result - limit content length for display
                     let display_content = if content.chars().count() > 500 {
                         let truncated: String = content.chars().take(500).collect();
@@ -723,28 +923,32 @@ Keep responses concise and terminal-friendly.",
                     });
                     has_new_content = true;
                 }
+                StreamMessage::TaskNotification { task_id, status, summary } => {
+                    // Display background task notification as system message
+                    let notification = format!("[Task {}] {}: {}", task_id, status, summary);
+                    self.add_to_history(HistoryItem {
+                        item_type: HistoryType::System,
+                        content: notification,
+                    });
+                    has_new_content = true;
+                }
                 StreamMessage::Done { result, session_id } => {
-                    debug_log(&format!("Processing Done: result={} chars, session_id={:?}", result.len(), session_id));
                     // Update session ID if provided
                     if let Some(sid) = session_id {
                         self.session_id = Some(sid);
                     }
                     // Finalize with the result
                     self.finalize_streaming_history(&result);
-                    self.is_processing = false;
-                    self.response_receiver = None;
-                    debug_log("Done processing complete, returning true for final refresh");
-                    return true;
+                    processing_done = true;
+                    has_new_content = true;
                 }
                 StreamMessage::Error { message } => {
-                    debug_log(&format!("Processing Error: {}", message));
                     self.add_to_history(HistoryItem {
                         item_type: HistoryType::Error,
                         content: message,
                     });
-                    self.is_processing = false;
-                    self.response_receiver = None;
-                    return true;
+                    processing_done = true;
+                    has_new_content = true;
                 }
             }
 
@@ -755,7 +959,7 @@ Keep responses concise and terminal-friendly.",
         }
 
         // Handle disconnection
-        if channel_disconnected {
+        if channel_disconnected && !processing_done {
             if !self.streaming_buffer.is_empty() {
                 let buffer = self.streaming_buffer.clone();
                 self.finalize_streaming_history(&buffer);
@@ -765,9 +969,14 @@ Keep responses concise and terminal-friendly.",
                     content: "Request was cancelled or failed.".to_string(),
                 });
             }
+            processing_done = true;
+            has_new_content = true;
+        }
+
+        // Clean up if processing is done
+        if processing_done {
             self.is_processing = false;
             self.response_receiver = None;
-            return true;
         }
 
         has_new_content
@@ -775,23 +984,18 @@ Keep responses concise and terminal-friendly.",
 
     /// Update streaming history with current buffer content
     fn update_streaming_history(&mut self) {
-        debug_log(&format!("update_streaming_history: buffer={} chars, history_len={}",
-            self.streaming_buffer.len(), self.history.len()));
-
         // Find or create the streaming Assistant item
         let normalized = normalize_empty_lines(&self.streaming_buffer);
 
         // Check if last item is a streaming Assistant response
         if let Some(last) = self.history.last_mut() {
             if last.item_type == HistoryType::Assistant && self.is_processing {
-                debug_log("  -> Updating existing Assistant item");
                 last.content = normalized;
                 return;
             }
         }
 
         // Add new Assistant item
-        debug_log("  -> Adding new Assistant item");
         self.history.push(HistoryItem {
             item_type: HistoryType::Assistant,
             content: normalized,
@@ -805,8 +1009,6 @@ Keep responses concise and terminal-friendly.",
 
     /// Finalize streaming with the final result
     fn finalize_streaming_history(&mut self, final_result: &str) {
-        debug_log(&format!("finalize_streaming_history: result={} chars", final_result.len()));
-
         // Clear streaming buffer
         self.streaming_buffer.clear();
 
@@ -815,14 +1017,13 @@ Keep responses concise and terminal-friendly.",
             let normalized = normalize_empty_lines(final_result);
 
             // Find the last Assistant item and update it
-            if let Some(last) = self.history.iter_mut().rev()
-                .find(|h| h.item_type == HistoryType::Assistant)
-            {
-                debug_log("  -> Updated existing Assistant item with final result");
+            let found_assistant = self.history.iter_mut().rev()
+                .find(|h| h.item_type == HistoryType::Assistant);
+
+            if let Some(last) = found_assistant {
                 last.content = normalized;
             } else {
                 // No Assistant item found, add one
-                debug_log("  -> Adding new Assistant item with final result");
                 self.add_to_history(HistoryItem {
                     item_type: HistoryType::Assistant,
                     content: normalized,
@@ -913,7 +1114,8 @@ pub fn draw_with_focus(frame: &mut Frame, state: &mut AIScreenState, area: Rect,
 fn draw_history(frame: &mut Frame, state: &mut AIScreenState, area: Rect, theme: &Theme, focused: bool) {
     // Build title with path and session info
     let session_info = if let Some(ref sid) = state.session_id {
-        format!("Session: {}...", &sid[..sid.len().min(8)])
+        let sid_preview: String = sid.chars().take(8).collect();
+        format!("Session: {}...", sid_preview)
     } else {
         "New Session".to_string()
     };
@@ -957,35 +1159,31 @@ fn draw_history(frame: &mut Frame, state: &mut AIScreenState, area: Rect, theme:
     for item in &state.history {
         match item.item_type {
             HistoryType::ToolUse => {
-                // Tool use: "⚙ Bash" followed by input
+                // Tool use: ":: ToolName" followed by simplified parameters
                 let content_lines: Vec<&str> = item.content.lines().collect();
-
-                // Create JSON highlighter for tool input
-                let mut json_highlighter = SyntaxHighlighter::new(Language::Json, theme.syntax);
 
                 for (i, line_text) in content_lines.iter().enumerate() {
                     if i == 0 {
-                        // First line is the tool name
+                        // First line is the tool name with bracket style
                         lines.push(Line::from(vec![
-                            Span::styled("⚙ ", Style::default().fg(theme.ai_screen.tool_use_prefix).add_modifier(Modifier::BOLD)),
+                            Span::styled("[", Style::default().fg(theme.ai_screen.tool_use_prefix)),
                             Span::styled(line_text.to_string(), Style::default().fg(theme.ai_screen.tool_use_name).add_modifier(Modifier::BOLD)),
+                            Span::styled("]", Style::default().fg(theme.ai_screen.tool_use_prefix)),
                         ]));
                     } else {
-                        // Subsequent lines are the JSON input - apply syntax highlighting
-                        let tokens = json_highlighter.tokenize_line(line_text);
-                        let mut spans = vec![Span::styled("  ", Style::default())];
-                        for token in tokens {
-                            spans.push(Span::styled(token.text, json_highlighter.style_for(token.token_type)));
-                        }
-                        lines.push(Line::from(spans));
+                        // Subsequent lines show simplified parameters
+                        lines.push(Line::from(vec![
+                            Span::styled("  ", Style::default()),
+                            Span::styled(line_text.to_string(), Style::default().fg(theme.ai_screen.tool_use_input)),
+                        ]));
                     }
                 }
             }
             HistoryType::ToolResult => {
-                // Tool result: "→ " followed by result
+                // Tool result: "->" followed by result
                 let content_lines: Vec<&str> = item.content.lines().collect();
                 for (i, line_text) in content_lines.iter().enumerate() {
-                    let prefix = if i == 0 { "→ " } else { "  " };
+                    let prefix = if i == 0 { "-> " } else { "   " };
                     lines.push(Line::from(vec![
                         Span::styled(prefix, Style::default().fg(theme.ai_screen.tool_result_prefix).add_modifier(Modifier::BOLD)),
                         Span::styled(line_text.to_string(), Style::default().fg(theme.ai_screen.tool_result_text)),
