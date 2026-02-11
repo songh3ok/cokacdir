@@ -5,6 +5,7 @@ use ratatui::{
     widgets::{Block, Clear, Paragraph},
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 use super::{
     app::{App, Screen},
@@ -22,6 +23,7 @@ use super::{
     help,
     diff_screen,
     diff_file_view,
+    git_screen,
     theme::Theme,
 };
 
@@ -102,6 +104,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 diff_file_view::draw(frame, state, area, &theme);
             }
         }
+        Screen::GitScreen => {
+            if let Some(ref mut state) = app.git_screen_state {
+                git_screen::draw(frame, state, area, &theme);
+            }
+        }
     }
 
     // Draw advanced search dialog overlay if active
@@ -112,6 +119,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // Draw dialog overlay on top of everything (모든 화면 위에 다이얼로그 표시)
     if let Some(ref dialog) = app.dialog {
         dialogs::draw_dialog(frame, app, dialog, area, &theme);
+
+        // Update git log diff visible height for scroll calculation
+        if dialog.dialog_type == crate::ui::app::DialogType::GitLogDiff {
+            if let Some(ref mut state) = app.git_log_diff_state {
+                let dialog_h = area.height.saturating_sub(6).max(15).min(30);
+                let inner_h = dialog_h.saturating_sub(2); // borders
+                state.visible_height = inner_h.saturating_sub(3) as usize; // header + gap + buttons
+            }
+        }
     }
 
     // Update message timer
@@ -226,7 +242,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let status = Line::from(vec![
         Span::styled(format!(" {} ", left_text), theme.status_bar_style()),
         Span::styled(
-            " ".repeat(area.width.saturating_sub(left_text.len() as u16 + right_text.len() as u16 + 4) as usize),
+            " ".repeat(area.width.saturating_sub(left_text.width() as u16 + right_text.width() as u16 + 4) as usize),
             theme.status_bar_style(),
         ),
         Span::styled(format!(" {} ", right_text), theme.status_bar_style()),
@@ -271,6 +287,8 @@ fn draw_function_bar(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         ("1", "hom "),
         ("2", "ref "),
         ("'", "mrk "),
+        ("g", "it "),
+        ("7", "gdif "),
         ("8", "diff "),
         ("0", "+pan "),
         ("9", "-pan "),
@@ -293,9 +311,9 @@ fn draw_function_bar(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     }
 
     // Calculate shortcuts width and add padding + version
-    let shortcuts_width: usize = shortcuts.iter().map(|(k, r)| k.len() + r.len()).sum();
+    let shortcuts_width: usize = shortcuts.iter().map(|(k, r)| k.width() + r.width()).sum();
     let version_text = format!(" {}", APP_TITLE);
-    let padding_width = (area.width as usize).saturating_sub(shortcuts_width + version_text.len());
+    let padding_width = (area.width as usize).saturating_sub(shortcuts_width + version_text.width());
 
     spans.push(Span::styled(" ".repeat(padding_width), theme.dim_style()));
     spans.push(Span::styled(version_text, theme.dim_style()));

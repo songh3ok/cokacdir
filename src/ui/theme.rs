@@ -191,6 +191,21 @@ pub struct DialogColors {
     pub tar_exclude_button_text: Color,     // 버튼 텍스트
     pub tar_exclude_button_selected_bg: Color,   // 선택된 버튼 배경
     pub tar_exclude_button_selected_text: Color, // 선택된 버튼 텍스트
+
+    // === Git Log Diff 다이얼로그 ===
+    pub git_log_diff_title: Color,               // 제목
+    pub git_log_diff_border: Color,              // 테두리
+    pub git_log_diff_bg: Color,                  // 배경
+    pub git_log_diff_message_text: Color,        // 안내 메시지
+    pub git_log_diff_entry_text: Color,          // 커밋 항목 텍스트
+    pub git_log_diff_selected_text: Color,       // 선택된(체크) 커밋 텍스트
+    pub git_log_diff_cursor_text: Color,         // 커서 위치 텍스트
+    pub git_log_diff_cursor_bg: Color,           // 커서 위치 배경
+    pub git_log_diff_button_text: Color,         // 비선택 버튼 텍스트
+    pub git_log_diff_button_selected_text: Color,  // 선택 버튼 텍스트
+    pub git_log_diff_button_selected_bg: Color,    // 선택 버튼 배경
+    pub git_log_diff_button_disabled_text: Color,  // 비활성 버튼 텍스트
+    pub git_log_diff_scroll_info: Color,         // 스크롤 정보
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -251,6 +266,7 @@ pub struct EditorColors {
     pub find_input_text: Color,
     pub find_option: Color,
     pub find_option_active: Color,
+    pub wrap_indicator: Color,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -589,6 +605,36 @@ pub struct DiffFileViewColors {
     pub footer_text: Color,
 }
 
+#[derive(Clone, Copy)]
+pub struct GitScreenColors {
+    pub bg: Color,
+    pub border: Color,
+    pub header_branch: Color,
+    pub header_path: Color,
+    pub tab_active: Color,
+    pub tab_inactive: Color,
+    pub tab_bar_bg: Color,
+    pub file_staged: Color,
+    pub file_modified: Color,
+    pub file_untracked: Color,
+    pub file_deleted: Color,
+    pub selected_bg: Color,
+    pub selected_text: Color,
+    pub footer_key: Color,
+    pub footer_text: Color,
+    pub commit_input_border: Color,
+    pub commit_input_text: Color,
+    pub log_hash: Color,
+    pub log_message: Color,
+    pub log_author: Color,
+    pub log_date: Color,
+    pub branch_current: Color,
+    pub branch_normal: Color,
+    pub diff_add: Color,
+    pub diff_remove: Color,
+    pub diff_header: Color,
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 메인 Theme 구조체
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -624,6 +670,7 @@ pub struct Theme {
     pub advanced_search: AdvancedSearchColors,
     pub diff: DiffColors,
     pub diff_file_view: DiffFileViewColors,
+    pub git_screen: GitScreenColors,
 
     // 아이콘 문자
     pub chars: ThemeChars,
@@ -797,6 +844,21 @@ impl Theme {
             tar_exclude_button_text: Color::Indexed(251), // 버튼 텍스트 (dialog.button_text와 동일)
             tar_exclude_button_selected_bg: Color::Indexed(67),   // 선택 버튼 배경
             tar_exclude_button_selected_text: Color::Indexed(231), // 선택 버튼 텍스트
+
+            // === Git Log Diff ===
+            git_log_diff_title: Color::Indexed(238),
+            git_log_diff_border: Color::Indexed(238),
+            git_log_diff_bg: Color::Indexed(255),
+            git_log_diff_message_text: Color::Indexed(243),
+            git_log_diff_entry_text: Color::Indexed(243),
+            git_log_diff_selected_text: Color::Indexed(34),
+            git_log_diff_cursor_text: Color::Indexed(231),
+            git_log_diff_cursor_bg: Color::Indexed(67),
+            git_log_diff_button_text: Color::Indexed(251),
+            git_log_diff_button_selected_text: Color::Indexed(231),
+            git_log_diff_button_selected_bg: Color::Indexed(67),
+            git_log_diff_button_disabled_text: Color::Indexed(251),
+            git_log_diff_scroll_info: Color::Indexed(251),
         };
 
         // 확인 다이얼로그 (Large File/Image Confirm)
@@ -845,6 +907,7 @@ impl Theme {
             find_input_text: Color::Indexed(243),
             find_option: Color::Indexed(251),
             find_option_active: Color::Indexed(74),
+            wrap_indicator: Color::Indexed(248),
         };
 
         // 코드 하이라이팅 (라이트 테마)
@@ -1133,6 +1196,35 @@ impl Theme {
             footer_text: Color::Indexed(251),
         };
 
+        let git_screen = GitScreenColors {
+            bg: Color::Indexed(255),
+            border: Color::Indexed(238),
+            header_branch: Color::Indexed(34),
+            header_path: Color::Indexed(243),
+            tab_active: Color::Indexed(21),
+            tab_inactive: Color::Indexed(251),
+            tab_bar_bg: Color::Indexed(254),
+            file_staged: Color::Indexed(34),
+            file_modified: Color::Indexed(136),
+            file_untracked: Color::Indexed(198),
+            file_deleted: Color::Indexed(124),
+            selected_bg: Color::Indexed(67),
+            selected_text: Color::Indexed(231),
+            footer_key: Color::Indexed(74),
+            footer_text: Color::Indexed(251),
+            commit_input_border: Color::Indexed(238),
+            commit_input_text: Color::Indexed(243),
+            log_hash: Color::Indexed(67),
+            log_message: Color::Indexed(243),
+            log_author: Color::Indexed(21),
+            log_date: Color::Indexed(251),
+            branch_current: Color::Indexed(34),
+            branch_normal: Color::Indexed(243),
+            diff_add: Color::Indexed(34),
+            diff_remove: Color::Indexed(198),
+            diff_header: Color::Indexed(21),
+        };
+
         Self {
             palette,
             state,
@@ -1157,6 +1249,7 @@ impl Theme {
             advanced_search,
             diff,
             diff_file_view,
+            git_screen,
             chars: ThemeChars::default(),
         }
     }
@@ -1271,6 +1364,21 @@ impl Theme {
             tar_exclude_button_text: Color::Indexed(245), // 버튼 텍스트 (dialog.button_text와 동일)
             tar_exclude_button_selected_bg: Color::Indexed(117),  // 선택 버튼 배경
             tar_exclude_button_selected_text: Color::Indexed(235), // 선택 버튼 텍스트
+
+            // === Git Log Diff ===
+            git_log_diff_title: Color::Indexed(255),
+            git_log_diff_border: Color::Indexed(252),
+            git_log_diff_bg: Color::Indexed(236),
+            git_log_diff_message_text: Color::Indexed(252),
+            git_log_diff_entry_text: Color::Indexed(252),
+            git_log_diff_selected_text: Color::Indexed(84),
+            git_log_diff_cursor_text: Color::Indexed(235),
+            git_log_diff_cursor_bg: Color::Indexed(117),
+            git_log_diff_button_text: Color::Indexed(245),
+            git_log_diff_button_selected_text: Color::Indexed(235),
+            git_log_diff_button_selected_bg: Color::Indexed(117),
+            git_log_diff_button_disabled_text: Color::Indexed(242),
+            git_log_diff_scroll_info: Color::Indexed(245),
         };
 
         // 확인 다이얼로그 (Large File/Image Confirm)
@@ -1317,6 +1425,7 @@ impl Theme {
             find_input_text: Color::Indexed(117),
             find_option: Color::Indexed(245),
             find_option_active: Color::Indexed(117),
+            wrap_indicator: Color::Indexed(240),
         };
 
         // 코드 하이라이팅 (다크 테마)
@@ -1558,6 +1667,35 @@ impl Theme {
             footer_text: Color::Indexed(245),
         };
 
+        let git_screen = GitScreenColors {
+            bg: Color::Indexed(235),
+            border: Color::Indexed(245),
+            header_branch: Color::Indexed(114),
+            header_path: Color::Indexed(252),
+            tab_active: Color::Indexed(81),
+            tab_inactive: Color::Indexed(245),
+            tab_bar_bg: Color::Indexed(236),
+            file_staged: Color::Indexed(114),
+            file_modified: Color::Indexed(220),
+            file_untracked: Color::Indexed(204),
+            file_deleted: Color::Indexed(209),
+            selected_bg: Color::Indexed(240),
+            selected_text: Color::Indexed(255),
+            footer_key: Color::Indexed(117),
+            footer_text: Color::Indexed(245),
+            commit_input_border: Color::Indexed(245),
+            commit_input_text: Color::Indexed(252),
+            log_hash: Color::Indexed(117),
+            log_message: Color::Indexed(252),
+            log_author: Color::Indexed(81),
+            log_date: Color::Indexed(245),
+            branch_current: Color::Indexed(114),
+            branch_normal: Color::Indexed(252),
+            diff_add: Color::Indexed(114),
+            diff_remove: Color::Indexed(204),
+            diff_header: Color::Indexed(81),
+        };
+
         Self {
             palette,
             state,
@@ -1582,6 +1720,7 @@ impl Theme {
             advanced_search,
             diff,
             diff_file_view,
+            git_screen,
             chars: ThemeChars::default(),
         }
     }
@@ -1690,6 +1829,21 @@ impl Theme {
             tar_exclude_button_text: Color::Indexed(102),
             tar_exclude_button_selected_bg: Color::Indexed(60),
             tar_exclude_button_selected_text: Color::Indexed(195),
+
+            // === Git Log Diff ===
+            git_log_diff_title: Color::Indexed(195),
+            git_log_diff_border: Color::Indexed(146),
+            git_log_diff_bg: Color::Indexed(235),
+            git_log_diff_message_text: Color::Indexed(188),
+            git_log_diff_entry_text: Color::Indexed(188),
+            git_log_diff_selected_text: Color::Indexed(108),
+            git_log_diff_cursor_text: Color::Indexed(195),
+            git_log_diff_cursor_bg: Color::Indexed(60),
+            git_log_diff_button_text: Color::Indexed(102),
+            git_log_diff_button_selected_text: Color::Indexed(195),
+            git_log_diff_button_selected_bg: Color::Indexed(60),
+            git_log_diff_button_disabled_text: Color::Indexed(239),
+            git_log_diff_scroll_info: Color::Indexed(102),
         };
 
         let confirm_dialog = ConfirmDialogColors {
@@ -1735,6 +1889,7 @@ impl Theme {
             find_input_text: Color::Indexed(188),
             find_option: Color::Indexed(102),
             find_option_active: Color::Indexed(110),
+            wrap_indicator: Color::Indexed(239),
         };
 
         let syntax = SyntaxColors {
@@ -1975,6 +2130,35 @@ impl Theme {
             footer_text: Color::Indexed(102),
         };
 
+        let git_screen = GitScreenColors {
+            bg: Color::Indexed(234),
+            border: Color::Indexed(102),
+            header_branch: Color::Indexed(108),
+            header_path: Color::Indexed(188),
+            tab_active: Color::Indexed(110),
+            tab_inactive: Color::Indexed(102),
+            tab_bar_bg: Color::Indexed(235),
+            file_staged: Color::Indexed(108),
+            file_modified: Color::Indexed(180),
+            file_untracked: Color::Indexed(174),
+            file_deleted: Color::Indexed(167),
+            selected_bg: Color::Indexed(239),
+            selected_text: Color::Indexed(195),
+            footer_key: Color::Indexed(146),
+            footer_text: Color::Indexed(102),
+            commit_input_border: Color::Indexed(102),
+            commit_input_text: Color::Indexed(188),
+            log_hash: Color::Indexed(146),
+            log_message: Color::Indexed(188),
+            log_author: Color::Indexed(110),
+            log_date: Color::Indexed(102),
+            branch_current: Color::Indexed(108),
+            branch_normal: Color::Indexed(188),
+            diff_add: Color::Indexed(108),
+            diff_remove: Color::Indexed(174),
+            diff_header: Color::Indexed(110),
+        };
+
         Self {
             palette,
             state,
@@ -1999,6 +2183,7 @@ impl Theme {
             advanced_search,
             diff,
             diff_file_view,
+            git_screen,
             chars: ThemeChars::default(),
         }
     }
@@ -2296,7 +2481,33 @@ impl Theme {
     "__tar_exclude_button_selected_bg__": "압축 제외 다이얼로그의 선택된 버튼 배경. dialog.button_selected_bg와 유사",
     "tar_exclude_button_selected_bg": {},
     "__tar_exclude_button_selected_text__": "압축 제외 다이얼로그의 선택된 버튼 텍스트. tar_exclude_button_selected_bg 위에 표시됨",
-    "tar_exclude_button_selected_text": {}
+    "tar_exclude_button_selected_text": {},
+    "__git_log_diff_title__": "Git Log Diff 다이얼로그의 제목. git_log_diff_bg 위에 표시됨",
+    "git_log_diff_title": {},
+    "__git_log_diff_border__": "Git Log Diff 다이얼로그의 테두리. git_log_diff_bg를 둘러쌈",
+    "git_log_diff_border": {},
+    "__git_log_diff_bg__": "Git Log Diff 다이얼로그의 배경색",
+    "git_log_diff_bg": {},
+    "__git_log_diff_message_text__": "Git Log Diff 다이얼로그의 안내 메시지 텍스트. git_log_diff_bg 위에 표시됨",
+    "git_log_diff_message_text": {},
+    "__git_log_diff_entry_text__": "Git Log Diff 다이얼로그의 커밋 항목 텍스트. git_log_diff_bg 위에 표시됨",
+    "git_log_diff_entry_text": {},
+    "__git_log_diff_selected_text__": "Git Log Diff 다이얼로그에서 Space로 선택(체크)된 커밋 텍스트. git_log_diff_bg 위에 표시됨",
+    "git_log_diff_selected_text": {},
+    "__git_log_diff_cursor_text__": "Git Log Diff 다이얼로그에서 현재 커서 위치의 텍스트. git_log_diff_cursor_bg 위에 표시됨",
+    "git_log_diff_cursor_text": {},
+    "__git_log_diff_cursor_bg__": "Git Log Diff 다이얼로그에서 현재 커서 위치의 배경색",
+    "git_log_diff_cursor_bg": {},
+    "__git_log_diff_button_text__": "Git Log Diff 다이얼로그의 비선택 버튼 텍스트",
+    "git_log_diff_button_text": {},
+    "__git_log_diff_button_selected_text__": "Git Log Diff 다이얼로그의 선택된 버튼 텍스트. git_log_diff_button_selected_bg 위에 표시됨",
+    "git_log_diff_button_selected_text": {},
+    "__git_log_diff_button_selected_bg__": "Git Log Diff 다이얼로그의 선택된 버튼 배경색",
+    "git_log_diff_button_selected_bg": {},
+    "__git_log_diff_button_disabled_text__": "Git Log Diff 다이얼로그의 비활성(2개 미선택) 버튼 텍스트",
+    "git_log_diff_button_disabled_text": {},
+    "__git_log_diff_scroll_info__": "Git Log Diff 다이얼로그의 스크롤 정보. git_log_diff_bg 위에 표시됨",
+    "git_log_diff_scroll_info": {}
   }},
 
   "__confirm_dialog__": "=== 확인 다이얼로그: 파일 삭제, 덮어쓰기, 대용량 파일 열기 등 사용자 확인이 필요한 작업의 모달 ===",
@@ -2380,7 +2591,9 @@ impl Theme {
     "__find_option__": "찾기 옵션(Case sensitive, Whole word)의 비활성 상태 색상. footer_bg 위에 표시됨. find_option_active보다 낮은 시각적 강조. 현재 꺼진 옵션",
     "find_option": {},
     "__find_option_active__": "찾기 옵션의 활성 상태 색상. footer_bg 위에 표시됨. find_option보다 높은 시각적 강조. 현재 켜진 옵션임을 명확히 표시",
-    "find_option_active": {}
+    "find_option_active": {},
+    "__wrap_indicator__": "줄 바꿈 표시자 색상. footer_bg 위에 표시됨. Word wrap 모드 활성화 시 하단바에 'Wrap' 텍스트로 표시",
+    "wrap_indicator": {}
   }},
 
   "__syntax__": "=== 코드 하이라이팅: 에디터/뷰어에서 프로그래밍 언어 문법을 색상으로 구분. 모두 editor.bg 또는 viewer.bg 위에 표시됨. 서로 구분되면서도 조화로운 색상 팔레트 필요 ===",
@@ -2833,6 +3046,62 @@ impl Theme {
     "footer_key": {},
     "__footer_text__": "기능 바 설명",
     "footer_text": {}
+  }},
+
+  "__git_screen__": "=== Git Screen: Git 저장소 상태, 커밋, 로그, 브랜치를 관리하는 전용 화면 ===",
+  "git_screen": {{
+    "__bg__": "배경색",
+    "bg": {},
+    "__border__": "테두리",
+    "border": {},
+    "__header_branch__": "헤더 브랜치명 텍스트",
+    "header_branch": {},
+    "__header_path__": "헤더 경로 텍스트",
+    "header_path": {},
+    "__tab_active__": "활성 탭 텍스트",
+    "tab_active": {},
+    "__tab_inactive__": "비활성 탭 텍스트",
+    "tab_inactive": {},
+    "__tab_bar_bg__": "탭 바 배경",
+    "tab_bar_bg": {},
+    "__file_staged__": "Staged 파일 텍스트",
+    "file_staged": {},
+    "__file_modified__": "Modified 파일 텍스트",
+    "file_modified": {},
+    "__file_untracked__": "Untracked 파일 텍스트",
+    "file_untracked": {},
+    "__file_deleted__": "Deleted 파일 텍스트",
+    "file_deleted": {},
+    "__selected_bg__": "선택된 항목 배경",
+    "selected_bg": {},
+    "__selected_text__": "선택된 항목 텍스트",
+    "selected_text": {},
+    "__footer_key__": "기능 바 단축키",
+    "footer_key": {},
+    "__footer_text__": "기능 바 설명",
+    "footer_text": {},
+    "__commit_input_border__": "커밋 메시지 입력란 테두리",
+    "commit_input_border": {},
+    "__commit_input_text__": "커밋 메시지 입력란 텍스트",
+    "commit_input_text": {},
+    "__log_hash__": "로그 커밋 해시",
+    "log_hash": {},
+    "__log_message__": "로그 커밋 메시지",
+    "log_message": {},
+    "__log_author__": "로그 커밋 작성자",
+    "log_author": {},
+    "__log_date__": "로그 커밋 날짜",
+    "log_date": {},
+    "__branch_current__": "현재 브랜치 텍스트",
+    "branch_current": {},
+    "__branch_normal__": "일반 브랜치 텍스트",
+    "branch_normal": {},
+    "__diff_add__": "Diff 추가 라인",
+    "diff_add": {},
+    "__diff_remove__": "Diff 삭제 라인",
+    "diff_remove": {},
+    "__diff_header__": "Diff 헤더",
+    "diff_header": {}
   }}
 }}"#,
             // name
@@ -2877,6 +3146,13 @@ impl Theme {
             ci(self.dialog.tar_exclude_path_text), ci(self.dialog.tar_exclude_scroll_info),
             ci(self.dialog.tar_exclude_button_text), ci(self.dialog.tar_exclude_button_selected_bg),
             ci(self.dialog.tar_exclude_button_selected_text),
+            ci(self.dialog.git_log_diff_title), ci(self.dialog.git_log_diff_border),
+            ci(self.dialog.git_log_diff_bg), ci(self.dialog.git_log_diff_message_text),
+            ci(self.dialog.git_log_diff_entry_text), ci(self.dialog.git_log_diff_selected_text),
+            ci(self.dialog.git_log_diff_cursor_text), ci(self.dialog.git_log_diff_cursor_bg),
+            ci(self.dialog.git_log_diff_button_text), ci(self.dialog.git_log_diff_button_selected_text),
+            ci(self.dialog.git_log_diff_button_selected_bg), ci(self.dialog.git_log_diff_button_disabled_text),
+            ci(self.dialog.git_log_diff_scroll_info),
             // confirm_dialog
             ci(self.confirm_dialog.bg), ci(self.confirm_dialog.border), ci(self.confirm_dialog.title),
             ci(self.confirm_dialog.message_text), ci(self.confirm_dialog.button_text),
@@ -2894,6 +3170,7 @@ impl Theme {
             ci(self.editor.modified_mark), ci(self.editor.footer_bg), ci(self.editor.footer_key),
             ci(self.editor.footer_text), ci(self.editor.find_input_text),
             ci(self.editor.find_option), ci(self.editor.find_option_active),
+            ci(self.editor.wrap_indicator),
             // syntax
             ci(self.syntax.keyword), ci(self.syntax.type_name), ci(self.syntax.string), ci(self.syntax.number),
             ci(self.syntax.comment), ci(self.syntax.operator), ci(self.syntax.function), ci(self.syntax.macro_name),
@@ -2993,6 +3270,19 @@ impl Theme {
             ci(self.diff_file_view.inline_change_bg), ci(self.diff_file_view.inline_change_text),
             ci(self.diff_file_view.status_bar_bg), ci(self.diff_file_view.status_bar_text),
             ci(self.diff_file_view.footer_key), ci(self.diff_file_view.footer_text),
+            // git_screen
+            ci(self.git_screen.bg), ci(self.git_screen.border),
+            ci(self.git_screen.header_branch), ci(self.git_screen.header_path),
+            ci(self.git_screen.tab_active), ci(self.git_screen.tab_inactive), ci(self.git_screen.tab_bar_bg),
+            ci(self.git_screen.file_staged), ci(self.git_screen.file_modified),
+            ci(self.git_screen.file_untracked), ci(self.git_screen.file_deleted),
+            ci(self.git_screen.selected_bg), ci(self.git_screen.selected_text),
+            ci(self.git_screen.footer_key), ci(self.git_screen.footer_text),
+            ci(self.git_screen.commit_input_border), ci(self.git_screen.commit_input_text),
+            ci(self.git_screen.log_hash), ci(self.git_screen.log_message),
+            ci(self.git_screen.log_author), ci(self.git_screen.log_date),
+            ci(self.git_screen.branch_current), ci(self.git_screen.branch_normal),
+            ci(self.git_screen.diff_add), ci(self.git_screen.diff_remove), ci(self.git_screen.diff_header),
         )
     }
 }

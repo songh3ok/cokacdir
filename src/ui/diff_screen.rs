@@ -145,6 +145,8 @@ pub struct DiffState {
     pub compare_method: CompareMethod,
     pub selected_files: HashSet<String>,
     pub visible_height: usize,
+    /// Set of relative_path values for collapsed directories
+    pub collapsed_dirs: HashSet<String>,
     // Async comparison fields
     pub is_comparing: bool,
     cancel_flag: Arc<AtomicBool>,
@@ -170,12 +172,13 @@ impl DiffState {
             filtered_indices: Vec::new(),
             selected_index: 0,
             scroll_offset: 0,
-            filter: DiffFilter::All,
+            filter: DiffFilter::DifferentOnly,
             sort_by,
             sort_order,
             compare_method,
             selected_files: HashSet::new(),
             visible_height: 0,
+            collapsed_dirs: HashSet::new(),
             is_comparing: false,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             receiver: None,
@@ -194,6 +197,7 @@ impl DiffState {
         self.is_comparing = true;
         self.all_entries.clear();
         self.filtered_indices.clear();
+        self.collapsed_dirs.clear();
         self.selected_index = 0;
         self.scroll_offset = 0;
         self.progress_current = String::new();
@@ -273,6 +277,13 @@ impl DiffState {
             match receiver.try_recv() {
                 Ok(DiffCompareResult(entries)) => {
                     self.all_entries = entries;
+                    // Collapse all directories by default
+                    self.collapsed_dirs.clear();
+                    for entry in &self.all_entries {
+                        if entry.is_directory {
+                            self.collapsed_dirs.insert(entry.relative_path.clone());
+                        }
+                    }
                     self.apply_filter();
                     self.is_comparing = false;
                     self.receiver = None;
@@ -311,9 +322,16 @@ impl DiffState {
             self.sort_order,
             &mut self.all_entries,
         );
+        // Collapse all directories by default
+        self.collapsed_dirs.clear();
+        for entry in &self.all_entries {
+            if entry.is_directory {
+                self.collapsed_dirs.insert(entry.relative_path.clone());
+            }
+        }
     }
 
-    /// Rebuild filtered_indices based on the current filter
+    /// Rebuild filtered_indices based on the current filter and collapsed state
     pub fn apply_filter(&mut self) {
         self.filtered_indices.clear();
 
@@ -370,11 +388,21 @@ impl DiffState {
             matching_indices.extend(parent_indices);
         }
 
-        // Build filtered_indices in order
+        // Build filtered_indices in order, skipping children of collapsed directories
         for i in 0..self.all_entries.len() {
-            if matching_indices.contains(&i) {
-                self.filtered_indices.push(i);
+            if !matching_indices.contains(&i) {
+                continue;
             }
+
+            let entry = &self.all_entries[i];
+
+            // Check if any ancestor directory is collapsed
+            let hidden = self.is_hidden_by_collapsed_ancestor(entry);
+            if hidden {
+                continue;
+            }
+
+            self.filtered_indices.push(i);
         }
 
         // Reset cursor if out of bounds
@@ -382,6 +410,204 @@ impl DiffState {
             self.selected_index = self.filtered_indices.len().saturating_sub(1);
         }
         self.scroll_offset = 0;
+    }
+
+    /// Check if an entry is hidden because one of its ancestor directories is collapsed
+    fn is_hidden_by_collapsed_ancestor(&self, entry: &DiffEntry) -> bool {
+        if entry.depth == 0 {
+            return false;
+        }
+        // Walk up the path to check each ancestor
+        let mut current_path = entry.relative_path.as_str();
+        while let Some(pos) = current_path.rfind('/') {
+            let parent_path = &current_path[..pos];
+            if self.collapsed_dirs.contains(parent_path) {
+                return true;
+            }
+            current_path = parent_path;
+        }
+        false
+    }
+
+    /// Toggle collapse/expand state for a directory
+    pub fn toggle_collapse(&mut self) {
+        if let Some(entry) = self.current_entry() {
+            if entry.is_directory {
+                let path = entry.relative_path.clone();
+                // Remember the all_entries index of the current entry to restore cursor position
+                let current_all_idx = self.filtered_indices.get(self.selected_index).copied();
+                if self.collapsed_dirs.contains(&path) {
+                    self.collapsed_dirs.remove(&path);
+                } else {
+                    // When collapsing, also collapse all descendant directories
+                    let prefix = format!("{}/", path);
+                    let descendants: Vec<String> = self.all_entries.iter()
+                        .filter(|e| e.is_directory && e.relative_path.starts_with(&prefix))
+                        .map(|e| e.relative_path.clone())
+                        .collect();
+                    for d in descendants {
+                        self.collapsed_dirs.insert(d);
+                    }
+                    self.collapsed_dirs.insert(path);
+                }
+                self.apply_filter();
+                // Restore cursor to the same entry
+                if let Some(all_idx) = current_all_idx {
+                    for (i, &fi) in self.filtered_indices.iter().enumerate() {
+                        if fi == all_idx {
+                            self.selected_index = i;
+                            break;
+                        }
+                    }
+                }
+                // Adjust scroll to keep cursor visible (will be finalized in draw)
+                if self.visible_height > 0 {
+                    if self.selected_index < self.scroll_offset {
+                        self.scroll_offset = self.selected_index;
+                    } else if self.selected_index >= self.scroll_offset + self.visible_height {
+                        self.scroll_offset = self.selected_index.saturating_sub(self.visible_height - 1);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Expand the current directory by one level (Right arrow)
+    /// Only expands if collapsed; child directories remain collapsed
+    pub fn expand_one_level(&mut self) {
+        if let Some(entry) = self.current_entry() {
+            if entry.is_directory && self.collapsed_dirs.contains(&entry.relative_path) {
+                let path = entry.relative_path.clone();
+                let current_all_idx = self.filtered_indices.get(self.selected_index).copied();
+                self.collapsed_dirs.remove(&path);
+                self.apply_filter();
+                if let Some(all_idx) = current_all_idx {
+                    for (i, &fi) in self.filtered_indices.iter().enumerate() {
+                        if fi == all_idx {
+                            self.selected_index = i;
+                            break;
+                        }
+                    }
+                }
+                if self.visible_height > 0 {
+                    if self.selected_index < self.scroll_offset {
+                        self.scroll_offset = self.selected_index;
+                    } else if self.selected_index >= self.scroll_offset + self.visible_height {
+                        self.scroll_offset = self.selected_index.saturating_sub(self.visible_height - 1);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Collapse the current directory by one level (Left arrow)
+    /// Only collapses if expanded; descendant directories also get collapsed
+    pub fn collapse_one_level(&mut self) {
+        if let Some(entry) = self.current_entry() {
+            if entry.is_directory && !self.collapsed_dirs.contains(&entry.relative_path) {
+                let path = entry.relative_path.clone();
+                let current_all_idx = self.filtered_indices.get(self.selected_index).copied();
+                let prefix = format!("{}/", path);
+                let descendants: Vec<String> = self.all_entries.iter()
+                    .filter(|e| e.is_directory && e.relative_path.starts_with(&prefix))
+                    .map(|e| e.relative_path.clone())
+                    .collect();
+                for d in descendants {
+                    self.collapsed_dirs.insert(d);
+                }
+                self.collapsed_dirs.insert(path);
+                self.apply_filter();
+                if let Some(all_idx) = current_all_idx {
+                    for (i, &fi) in self.filtered_indices.iter().enumerate() {
+                        if fi == all_idx {
+                            self.selected_index = i;
+                            break;
+                        }
+                    }
+                }
+                if self.visible_height > 0 {
+                    if self.selected_index < self.scroll_offset {
+                        self.scroll_offset = self.selected_index;
+                    } else if self.selected_index >= self.scroll_offset + self.visible_height {
+                        self.scroll_offset = self.selected_index.saturating_sub(self.visible_height - 1);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Expand all subdirectories under the current directory
+    pub fn expand_all(&mut self) {
+        if let Some(entry) = self.current_entry() {
+            if entry.is_directory {
+                let path = entry.relative_path.clone();
+                let current_all_idx = self.filtered_indices.get(self.selected_index).copied();
+                // Remove this directory and all descendants from collapsed_dirs
+                let prefix = format!("{}/", path);
+                self.collapsed_dirs.remove(&path);
+                let descendants: Vec<String> = self.collapsed_dirs.iter()
+                    .filter(|p| p.starts_with(&prefix))
+                    .cloned()
+                    .collect();
+                for d in descendants {
+                    self.collapsed_dirs.remove(&d);
+                }
+                self.apply_filter();
+                // Restore cursor
+                if let Some(all_idx) = current_all_idx {
+                    for (i, &fi) in self.filtered_indices.iter().enumerate() {
+                        if fi == all_idx {
+                            self.selected_index = i;
+                            break;
+                        }
+                    }
+                }
+                if self.visible_height > 0 {
+                    if self.selected_index < self.scroll_offset {
+                        self.scroll_offset = self.selected_index;
+                    } else if self.selected_index >= self.scroll_offset + self.visible_height {
+                        self.scroll_offset = self.selected_index.saturating_sub(self.visible_height - 1);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Collapse the current directory (and all its descendants)
+    pub fn collapse(&mut self) {
+        if let Some(entry) = self.current_entry() {
+            if entry.is_directory {
+                let path = entry.relative_path.clone();
+                let current_all_idx = self.filtered_indices.get(self.selected_index).copied();
+                // Collapse this directory and all descendant directories
+                let prefix = format!("{}/", path);
+                let descendants: Vec<String> = self.all_entries.iter()
+                    .filter(|e| e.is_directory && e.relative_path.starts_with(&prefix))
+                    .map(|e| e.relative_path.clone())
+                    .collect();
+                for d in descendants {
+                    self.collapsed_dirs.insert(d);
+                }
+                self.collapsed_dirs.insert(path);
+                self.apply_filter();
+                // Restore cursor
+                if let Some(all_idx) = current_all_idx {
+                    for (i, &fi) in self.filtered_indices.iter().enumerate() {
+                        if fi == all_idx {
+                            self.selected_index = i;
+                            break;
+                        }
+                    }
+                }
+                if self.visible_height > 0 {
+                    if self.selected_index < self.scroll_offset {
+                        self.scroll_offset = self.selected_index;
+                    } else if self.selected_index >= self.scroll_offset + self.visible_height {
+                        self.scroll_offset = self.selected_index.saturating_sub(self.visible_height - 1);
+                    }
+                }
+            }
+        }
     }
 
     /// Move cursor by delta within filtered_indices bounds
@@ -1566,17 +1792,17 @@ pub fn draw(
     // ── Column Headers ──────────────────────────────────────────────────────
     draw_column_headers(frame, col_header_area, theme);
 
-    // ── Content (split 50:50) ───────────────────────────────────────────────
-    let content_halves = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(content_area);
+    // ── Content (split 50:50, no gap) ──────────────────────────────────────
+    let left_width = content_area.width / 2;
+    let right_width = content_area.width - left_width;
+    let left_area = Rect::new(content_area.x, content_area.y, left_width, content_area.height);
+    let right_area = Rect::new(content_area.x + left_width, content_area.y, right_width, content_area.height);
 
     let visible_height = content_area.height as usize;
     state.adjust_scroll(visible_height);
 
-    draw_content_side(frame, state, content_halves[0], theme, true);
-    draw_content_side(frame, state, content_halves[1], theme, false);
+    draw_content_side(frame, state, left_area, theme, true);
+    draw_content_side(frame, state, right_area, theme, false);
 
     // ── Scrollbar ───────────────────────────────────────────────────────────
     if state.filtered_indices.len() > visible_height {
@@ -1689,8 +1915,9 @@ fn draw_comparing_progress(frame: &mut Frame, state: &DiffState, area: Rect, the
 
     // Line 3: Current file being compared
     let max_path_len = (area.width as usize).saturating_sub(6);
-    let current_display = if state.progress_current.len() > max_path_len {
-        format!("...{}", safe_suffix(&state.progress_current, max_path_len.saturating_sub(3)))
+    let current_display = if state.progress_current.width() > max_path_len {
+        let suffix = crate::utils::format::display_width_suffix(&state.progress_current, max_path_len.saturating_sub(3));
+        format!("...{}", suffix)
     } else {
         state.progress_current.clone()
     };
@@ -1724,18 +1951,20 @@ fn draw_header(frame: &mut Frame, state: &DiffState, area: Rect, theme: &Theme) 
     let max_path_width = (area.width as usize).saturating_sub(12); // "[DIFF] " + " ⟷ "
     let half_width = max_path_width / 2;
 
-    let left_display = if state.left_root.display().to_string().len() > half_width {
-        let s = state.left_root.display().to_string();
-        format!("...{}", safe_suffix(&s, half_width.saturating_sub(3)))
+    let left_str = state.left_root.display().to_string();
+    let left_display = if left_str.width() > half_width {
+        let suffix = crate::utils::format::display_width_suffix(&left_str, half_width.saturating_sub(3));
+        format!("...{}", suffix)
     } else {
-        state.left_root.display().to_string()
+        left_str
     };
 
-    let right_display = if state.right_root.display().to_string().len() > half_width {
-        let s = state.right_root.display().to_string();
-        format!("...{}", safe_suffix(&s, half_width.saturating_sub(3)))
+    let right_str = state.right_root.display().to_string();
+    let right_display = if right_str.width() > half_width {
+        let suffix = crate::utils::format::display_width_suffix(&right_str, half_width.saturating_sub(3));
+        format!("...{}", suffix)
     } else {
-        state.right_root.display().to_string()
+        right_str
     };
 
     let header_line = Line::from(vec![
@@ -1765,7 +1994,8 @@ fn draw_header(frame: &mut Frame, state: &DiffState, area: Rect, theme: &Theme) 
 }
 
 fn draw_column_headers(frame: &mut Frame, area: Rect, theme: &Theme) {
-    let half_width = area.width / 2;
+    let left_width = area.width / 2;
+    let right_width = area.width - left_width;
     let col_style = Style::default()
         .fg(theme.diff.column_header_text)
         .bg(theme.diff.column_header_bg)
@@ -1774,27 +2004,29 @@ fn draw_column_headers(frame: &mut Frame, area: Rect, theme: &Theme) {
     // Calculate column widths for each half: Name(fill) + Size(10) + Date(12)
     let size_col = 10;
     let date_col = 12;
-    let name_col = (half_width as usize).saturating_sub(size_col + date_col + 2);
 
-    let header_half = format!(
-        " {:<name_w$} {:>size_w$} {:>date_w$}",
-        "Name",
-        "Size",
-        "Date",
-        name_w = name_col,
-        size_w = size_col,
-        date_w = date_col,
-    );
-
-    // Truncate to half_width
-    let header_left = if header_half.width() > half_width as usize {
-        let s = safe_suffix(&header_half, half_width as usize);
-        s.to_string()
-    } else {
-        format!("{:<width$}", header_half, width = half_width as usize)
+    let build_header = |width: u16| -> String {
+        let w = width as usize;
+        let name_col = w.saturating_sub(size_col + date_col + 2);
+        let header = format!(
+            " {:<name_w$} {:>size_w$} {:>date_w$}",
+            "Name",
+            "Size",
+            "Date",
+            name_w = name_col,
+            size_w = size_col,
+            date_w = date_col,
+        );
+        if header.width() > w {
+            let s = safe_suffix(&header, w.saturating_sub(3));
+            format!("...{}", s)
+        } else {
+            format!("{:<width$}", header, width = w)
+        }
     };
 
-    let header_right = header_left.clone();
+    let header_left = build_header(left_width);
+    let header_right = build_header(right_width);
 
     let line = Line::from(vec![
         Span::styled(header_left, col_style),
@@ -1864,9 +2096,14 @@ fn draw_content_side(
             let selection_marker = if is_file_selected { "*" } else { " " };
 
             let display_name = if file_info.is_directory {
-                format!("{}{}{}/", selection_marker, indent, file_info.name)
+                let collapse_indicator = if state.collapsed_dirs.contains(&entry.relative_path) {
+                    "\u{25B6}" // ▶ (collapsed)
+                } else {
+                    "\u{25BC}" // ▼ (expanded)
+                };
+                format!("{}{}{} {}/", selection_marker, indent, collapse_indicator, file_info.name)
             } else {
-                format!("{}{}{}", selection_marker, indent, file_info.name)
+                format!("{}{}  {}", selection_marker, indent, file_info.name)
             };
 
             // Truncate name if too long
@@ -2042,7 +2279,11 @@ fn draw_status_bar(frame: &mut Frame, state: &DiffState, area: Rect, theme: &The
 fn draw_function_bar(frame: &mut Frame, area: Rect, theme: &Theme) {
     let shortcuts = vec![
         ("\u{2191}\u{2193}", "nav "),
+        ("\u{2192}", ":open "),
+        ("\u{2190}", ":close "),
         ("Enter", ":view "),
+        ("e", ":expand "),
+        ("c", ":collapse "),
         ("f", ":filter "),
         ("n", "ame "),
         ("s", "ize "),
@@ -2100,6 +2341,12 @@ pub fn handle_input(app: &mut App, code: KeyCode, _modifiers: KeyModifiers) {
             KeyCode::Down | KeyCode::Char('j') => {
                 state.move_cursor(1);
             }
+            KeyCode::Right | KeyCode::Char('l') => {
+                state.expand_one_level();
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                state.collapse_one_level();
+            }
             KeyCode::PageUp => {
                 let page = state.visible_height.saturating_sub(1).max(1) as i32;
                 state.move_cursor(-page);
@@ -2137,6 +2384,12 @@ pub fn handle_input(app: &mut App, code: KeyCode, _modifiers: KeyModifiers) {
                 toggle_diff_sort(state, SortBy::Type);
                 state.resort_entries();
             }
+            KeyCode::Char('e') => {
+                state.expand_all();
+            }
+            KeyCode::Char('c') => {
+                state.collapse();
+            }
             KeyCode::Enter => {
                 // Handle Enter: view file diff if current entry is a file
                 handle_enter(app);
@@ -2167,7 +2420,7 @@ fn toggle_diff_sort(state: &mut DiffState, sort_by: SortBy) {
     state.scroll_offset = 0;
 }
 
-/// Handle Enter key - open file content diff view for the selected entry
+/// Handle Enter key - toggle directory collapse or open file content diff view
 fn handle_enter(app: &mut App) {
     let entry = {
         let state = match app.diff_state.as_ref() {
@@ -2181,7 +2434,11 @@ fn handle_enter(app: &mut App) {
     };
 
     if entry.is_directory {
-        return; // Don't open directories
+        // Toggle collapse/expand for directories
+        if let Some(ref mut state) = app.diff_state {
+            state.toggle_collapse();
+        }
+        return;
     }
 
     // Need both sides for file diff view

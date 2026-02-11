@@ -1,4 +1,5 @@
 // === UTF-8 safe string slicing utilities ===
+use unicode_width::{UnicodeWidthStr, UnicodeWidthChar};
 
 /// Byte index를 가장 가까운 char boundary로 내림
 pub fn floor_char_boundary(s: &str, index: usize) -> usize {
@@ -117,6 +118,74 @@ pub fn format_permissions(_mode: u32) -> String {
     String::new()
 }
 
+// === CJK-aware display width utilities ===
+
+/// 표시 너비(display width) 기준으로 문자열을 잘라낸다.
+/// 전각 문자가 경계에 걸리면 공백으로 패딩하여 정확히 max_width 칸을 채운다.
+pub fn truncate_to_display_width(s: &str, max_width: usize) -> String {
+    let mut width = 0;
+    let mut result = String::new();
+    for c in s.chars() {
+        let cw = c.width().unwrap_or(1);
+        if width + cw > max_width {
+            break;
+        }
+        result.push(c);
+        width += cw;
+    }
+    // 전각 문자 경계에서 잘린 경우 공백 패딩
+    while width < max_width {
+        result.push(' ');
+        width += 1;
+    }
+    result
+}
+
+/// 표시 너비 기준으로 문자열을 target_width 칸에 맞춰 우측 공백 패딩한다.
+/// 이미 target_width 이상이면 잘라낸다.
+pub fn pad_to_display_width(s: &str, target_width: usize) -> String {
+    let current = s.width();
+    if current >= target_width {
+        truncate_to_display_width(s, target_width)
+    } else {
+        format!("{}{}", s, " ".repeat(target_width - current))
+    }
+}
+
+/// 표시 너비 기준으로 잘림 + "..." 접미사를 붙인다.
+/// max_width 이하이면 원본 반환.
+pub fn truncate_with_ellipsis(s: &str, max_width: usize) -> String {
+    if s.width() <= max_width {
+        return s.to_string();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+    let truncated = truncate_to_display_width(s, max_width.saturating_sub(3));
+    let trimmed = truncated.trim_end();
+    format!("{}...", trimmed)
+}
+
+/// 표시 너비 기준으로 뒤에서부터 max_width 칸 이내의 접미사를 반환한다.
+/// "..." 접두사 없이 순수 접미사만 반환. 호출자가 "..." 등을 붙인다.
+pub fn display_width_suffix(s: &str, max_width: usize) -> String {
+    if s.width() <= max_width {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut width = 0;
+    let mut start_idx = chars.len();
+    for i in (0..chars.len()).rev() {
+        let cw = chars[i].width().unwrap_or(1);
+        if width + cw > max_width {
+            break;
+        }
+        width += cw;
+        start_idx = i;
+    }
+    chars[start_idx..].iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +207,43 @@ mod tests {
         assert_eq!(format_permissions_short(0o644), "rw-r--r--");
         assert_eq!(format_permissions_short(0o777), "rwxrwxrwx");
         assert_eq!(format_permissions_short(0o000), "---------");
+    }
+
+    #[test]
+    fn test_truncate_to_display_width() {
+        // ASCII only
+        assert_eq!(truncate_to_display_width("abcdef", 4), "abcd");
+        // CJK: 한=2, 글=2, t=1 → 총 5칸
+        assert_eq!(truncate_to_display_width("한글t", 5), "한글t");
+        // CJK 경계: 너비 3에 "한글" → "한 " (한=2 + 공백1)
+        assert_eq!(truncate_to_display_width("한글", 3), "한 ");
+        // CJK 정확히 맞음
+        assert_eq!(truncate_to_display_width("한글", 4), "한글");
+        // 빈 문자열
+        assert_eq!(truncate_to_display_width("", 5), "     ");
+    }
+
+    #[test]
+    fn test_pad_to_display_width() {
+        assert_eq!(pad_to_display_width("abc", 6), "abc   ");
+        // CJK: 한글=4칸 → 6칸으로 패딩하면 공백 2개
+        assert_eq!(pad_to_display_width("한글", 6), "한글  ");
+        // 이미 충분하면 잘림
+        assert_eq!(pad_to_display_width("abcdef", 4), "abcd");
+    }
+
+    #[test]
+    fn test_truncate_with_ellipsis() {
+        assert_eq!(truncate_with_ellipsis("abc", 5), "abc");
+        assert_eq!(truncate_with_ellipsis("abcdefgh", 6), "abc...");
+        // CJK: "한글테스트" = 10칸, max=7 → "한글..."  (한글=4 + ...=3 = 7)
+        assert_eq!(truncate_with_ellipsis("한글테스트", 7), "한글...");
+    }
+
+    #[test]
+    fn test_display_width_suffix() {
+        assert_eq!(display_width_suffix("abcdef", 3), "def");
+        // CJK: "한글test" → 뒤에서 5칸 = "test" (4칸)... '글'=2칸 넣으면 6칸 초과 → "test"
+        assert_eq!(display_width_suffix("한글test", 5), "ltest");
     }
 }

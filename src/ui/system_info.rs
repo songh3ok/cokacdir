@@ -1,4 +1,5 @@
 use crossterm::event::KeyCode;
+use unicode_width::UnicodeWidthStr;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -8,6 +9,7 @@ use ratatui::{
 };
 
 use super::theme::Theme;
+use crate::utils::format::pad_to_display_width;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InfoTab {
@@ -363,12 +365,7 @@ fn draw_system_tab(frame: &mut Frame, area: Rect, theme: &Theme) {
     let cpu_inner = cpu_block.inner(chunks[2]);
     frame.render_widget(cpu_block, chunks[2]);
 
-    let cpu_model_display = if data.cpu_model.chars().count() > 50 {
-        let truncated: String = data.cpu_model.chars().take(47).collect();
-        format!("{}...", truncated)
-    } else {
-        data.cpu_model.clone()
-    };
+    let cpu_model_display = crate::utils::format::truncate_with_ellipsis(&data.cpu_model, 50);
     let load_str = format!("{:.2} / {:.2} / {:.2}", data.load_avg[0], data.load_avg[1], data.load_avg[2]);
 
     let cpu_lines = vec![
@@ -399,7 +396,7 @@ fn draw_disk_tab(frame: &mut Frame, state: &SystemInfoState, area: Rect, theme: 
 fn draw_disk_list_wide(frame: &mut Frame, state: &SystemInfoState, area: Rect, theme: &Theme) {
     // Header
     let header = Line::from(vec![
-        Span::styled(format!("{:20}", "Filesystem"), Style::default().fg(theme.system_info.disk_header).add_modifier(Modifier::BOLD)),
+        Span::styled(pad_to_display_width("Filesystem", 20), Style::default().fg(theme.system_info.disk_header).add_modifier(Modifier::BOLD)),
         Span::styled(format!("{:>8}", "Size"), Style::default().fg(theme.system_info.disk_header).add_modifier(Modifier::BOLD)),
         Span::styled(format!("{:>8}", "Used"), Style::default().fg(theme.system_info.disk_header).add_modifier(Modifier::BOLD)),
         Span::styled(format!("{:>8}", "Avail"), Style::default().fg(theme.system_info.disk_header).add_modifier(Modifier::BOLD)),
@@ -417,12 +414,7 @@ fn draw_disk_list_wide(frame: &mut Frame, state: &SystemInfoState, area: Rect, t
         let filled = (disk.use_percent as usize * bar_width / 100).min(bar_width);
         let bar = format!("{}{}", "█".repeat(filled), "░".repeat(bar_width - filled));
 
-        let fs_display = if disk.filesystem.chars().count() > 18 {
-            let truncated: String = disk.filesystem.chars().take(15).collect();
-            format!("{}...", truncated)
-        } else {
-            disk.filesystem.clone()
-        };
+        let fs_display = crate::utils::format::truncate_with_ellipsis(&disk.filesystem, 18);
 
         let line_style = if is_selected {
             theme.selected_style()
@@ -431,7 +423,7 @@ fn draw_disk_list_wide(frame: &mut Frame, state: &SystemInfoState, area: Rect, t
         };
 
         let line = Line::from(vec![
-            Span::styled(format!("{:20}", fs_display), line_style),
+            Span::styled(pad_to_display_width(&fs_display, 20), line_style),
             Span::styled(format!("{:>8}", disk.size), line_style),
             Span::styled(format!("{:>8}", disk.used), line_style),
             Span::styled(format!("{:>8}", disk.available), line_style),

@@ -584,6 +584,9 @@ fn run_app<B: ratatui::backend::Backend>(
                         Screen::DiffFileView => {
                             ui::diff_file_view::handle_input(app, key.code, key.modifiers);
                         }
+                        Screen::GitScreen => {
+                            ui::git_screen::handle_input(app, key.code, key.modifiers);
+                        }
                     }
                 }
                 Event::Paste(text) => {
@@ -611,6 +614,11 @@ fn run_app<B: ratatui::backend::Backend>(
                         Screen::ImageViewer => {
                             if app.dialog.is_some() {
                                 ui::dialogs::handle_paste(app, &text);
+                            }
+                        }
+                        Screen::GitScreen => {
+                            if let Some(ref mut state) = app.git_screen_state {
+                                ui::git_screen::handle_paste(state, &text);
                             }
                         }
                         _ => {}
@@ -762,6 +770,7 @@ fn handle_panel_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> 
         KeyCode::Char('0') => app.add_panel(),
         KeyCode::Char('1') => app.goto_home(),
         KeyCode::Char('2') => app.refresh_panels(),
+        KeyCode::Char('7') => app.show_git_log_diff_dialog(),
         KeyCode::Char('8') => app.start_diff(),
         KeyCode::Char('9') => app.close_panel(),
 
@@ -770,6 +779,9 @@ fn handle_panel_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> 
 
         // Settings dialog - '`'
         KeyCode::Char('`') => app.show_settings_dialog(),
+
+        // Git screen - 'g'
+        KeyCode::Char('g') | KeyCode::Char('G') => app.show_git_screen(),
 
         // Bookmark toggle - '\''
         KeyCode::Char('\'') => app.toggle_bookmark(),

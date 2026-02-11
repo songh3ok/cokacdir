@@ -163,6 +163,7 @@ pub enum Screen {
     SearchResult,
     DiffScreen,
     DiffFileView,
+    GitScreen,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +187,7 @@ pub enum DialogType {
     Settings,
     ExtensionHandlerError,
     BinaryFileHandler,
+    GitLogDiff,
 }
 
 /// Settings dialog state
@@ -359,6 +361,18 @@ pub struct CopyExcludeState {
     pub scroll_offset: usize,
     /// Whether this is a move operation (vs copy)
     pub is_move: bool,
+}
+
+/// State for git log diff dialog
+#[derive(Debug, Clone)]
+pub struct GitLogDiffState {
+    pub repo_path: PathBuf,
+    pub project_name: String,
+    pub log_entries: Vec<crate::ui::git_screen::GitLogEntry>,
+    pub selected_index: usize,
+    pub scroll_offset: usize,
+    pub selected_commits: Vec<String>,
+    pub visible_height: usize,
 }
 
 /// Clipboard operation type for Ctrl+C/X/V operations
@@ -921,6 +935,12 @@ pub struct App {
     pub diff_first_panel: Option<usize>,
     pub diff_state: Option<crate::ui::diff_screen::DiffState>,
     pub diff_file_view_state: Option<crate::ui::diff_file_view::DiffFileViewState>,
+
+    // Git screen state
+    pub git_screen_state: Option<crate::ui::git_screen::GitScreenState>,
+
+    // Git log diff state
+    pub git_log_diff_state: Option<GitLogDiffState>,
 }
 
 impl App {
@@ -991,6 +1011,8 @@ impl App {
             diff_first_panel: None,
             diff_state: None,
             diff_file_view_state: None,
+            git_screen_state: None,
+            git_log_diff_state: None,
         }
     }
 
@@ -1082,6 +1104,8 @@ impl App {
             diff_first_panel: None,
             diff_state: None,
             diff_file_view_state: None,
+            git_screen_state: None,
+            git_log_diff_state: None,
         }
     }
 
@@ -2503,6 +2527,128 @@ impl App {
     pub fn show_system_info(&mut self) {
         self.system_info_state = crate::ui::system_info::SystemInfoState::default();
         self.current_screen = Screen::SystemInfo;
+    }
+
+    pub fn show_git_screen(&mut self) {
+        let path = self.active_panel().path.clone();
+        if !crate::ui::git_screen::is_git_repo(&path) {
+            self.show_message("Not a git repository");
+            return;
+        }
+        self.git_screen_state = Some(crate::ui::git_screen::GitScreenState::new(path));
+        self.current_screen = Screen::GitScreen;
+    }
+
+    pub fn show_git_log_diff_dialog(&mut self) {
+        let path = self.active_panel().path.clone();
+        if !crate::ui::git_screen::is_git_repo(&path) {
+            self.show_message("Not a git repository");
+            return;
+        }
+        let repo_root = match crate::ui::git_screen::get_repo_root(&path) {
+            Some(r) => r,
+            None => {
+                self.show_message("Failed to get git repo root");
+                return;
+            }
+        };
+        let project_name = repo_root
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "project".to_string());
+        let log_entries = crate::ui::git_screen::get_log_public(&repo_root, 200);
+        if log_entries.is_empty() {
+            self.show_message("No git commits found");
+            return;
+        }
+        self.git_log_diff_state = Some(GitLogDiffState {
+            repo_path: repo_root,
+            project_name,
+            log_entries,
+            selected_index: 0,
+            scroll_offset: 0,
+            selected_commits: Vec::new(),
+            visible_height: 20,
+        });
+        self.dialog = Some(Dialog {
+            dialog_type: DialogType::GitLogDiff,
+            input: String::new(),
+            cursor_pos: 0,
+            message: String::new(),
+            completion: None,
+            selected_button: 0,
+            selection: None,
+        });
+    }
+
+    pub fn execute_git_log_diff(&mut self) {
+        self.dialog = None;
+
+        let state = match self.git_log_diff_state.take() {
+            Some(s) => s,
+            None => return,
+        };
+        if state.selected_commits.len() != 2 {
+            return;
+        }
+        let hash1 = state.selected_commits[0].clone();
+        let hash2 = state.selected_commits[1].clone();
+
+        // Validate hashes
+        if !hash1.chars().all(|c| c.is_ascii_alphanumeric())
+            || !hash2.chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            self.show_message("Invalid commit hash");
+            return;
+        }
+
+        let diff_base = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join(".cokacdir")
+            .join("diff");
+
+        // Remove existing diff directory and recreate
+        let _ = std::fs::remove_dir_all(&diff_base);
+        if std::fs::create_dir_all(&diff_base).is_err() {
+            self.show_message("Failed to create diff directory");
+            return;
+        }
+
+        let dir1 = diff_base.join(format!("{}_{}", state.project_name, hash1));
+        let dir2 = diff_base.join(format!("{}_{}", state.project_name, hash2));
+
+        // Copy repo to dir1 and dir2
+        for (dir, hash) in [(&dir1, &hash1), (&dir2, &hash2)] {
+            let repo_str = state.repo_path.display().to_string();
+            let dir_str = dir.display().to_string();
+            let status = std::process::Command::new("cp")
+                .args(["-a", &repo_str, &dir_str])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            if status.map(|s| !s.success()).unwrap_or(true) {
+                self.show_message("Failed to copy repository");
+                let _ = std::fs::remove_dir_all(&diff_base);
+                return;
+            }
+
+            // git checkout the commit
+            let checkout_status = crate::ui::git_screen::git_cmd_public(dir)
+                .args(["checkout", hash.as_str()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            if checkout_status.map(|s| !s.success()).unwrap_or(true) {
+                self.show_message(&format!("Failed to checkout {}", hash));
+                let _ = std::fs::remove_dir_all(&diff_base);
+                return;
+            }
+
+            // Remove .git directory
+            let _ = std::fs::remove_dir_all(dir.join(".git"));
+        }
+
+        self.enter_diff_screen(dir1, dir2);
     }
 
     #[allow(dead_code)]

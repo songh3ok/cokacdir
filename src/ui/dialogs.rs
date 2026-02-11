@@ -15,7 +15,7 @@ use crate::services::file_ops::FileOperationType;
 use crate::utils::format::{safe_suffix, safe_prefix};
 
 use super::{
-    app::{App, ConflictResolution, ConflictState, Dialog, DialogType, PathCompletion, SettingsState, fuzzy_match},
+    app::{App, ConflictResolution, ConflictState, Dialog, DialogType, GitLogDiffState, PathCompletion, SettingsState, fuzzy_match},
     theme::Theme,
 };
 
@@ -330,6 +330,11 @@ pub fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, th
             let max_height = base_height + 4; // max 5 input lines
             (dialog_width, height, max_height)
         }
+        DialogType::GitLogDiff => {
+            let w = area.width.saturating_sub(6).max(70).min(100);
+            let h = area.height.saturating_sub(6).max(15).min(30);
+            (w, h, h)
+        }
     };
 
     let x = area.x + (area.width.saturating_sub(width)) / 2;
@@ -390,6 +395,11 @@ pub fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, th
         }
         DialogType::BinaryFileHandler => {
             draw_binary_file_handler_dialog(frame, dialog, dialog_area, theme);
+        }
+        DialogType::GitLogDiff => {
+            if let Some(ref state) = app.git_log_diff_state {
+                draw_git_log_diff_dialog(frame, dialog, state, dialog_area, theme);
+            }
         }
     }
 }
@@ -2272,6 +2282,9 @@ pub fn handle_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers
             DialogType::BinaryFileHandler => {
                 return handle_binary_file_handler_input(app, code);
             }
+            DialogType::GitLogDiff => {
+                return handle_git_log_diff_input(app, code);
+            }
             _ => {
                 // selection 상태에서의 특수 처리
                 if let Some((sel_start, sel_end)) = dialog.selection {
@@ -3595,6 +3608,258 @@ fn draw_settings_dialog(frame: &mut Frame, state: &SettingsState, area: Rect, th
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
+}
+
+/// Git Log Diff dialog: select 2 commits to compare
+fn draw_git_log_diff_dialog(
+    frame: &mut Frame,
+    dialog: &Dialog,
+    state: &GitLogDiffState,
+    area: Rect,
+    theme: &Theme,
+) {
+    let block = Block::default()
+        .title(" Git Log Diff ")
+        .title_style(Style::default().fg(theme.dialog.git_log_diff_title).add_modifier(Modifier::BOLD))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.dialog.git_log_diff_border))
+        .style(Style::default().bg(theme.dialog.git_log_diff_bg));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height < 5 || inner.width < 20 {
+        return;
+    }
+
+    // Header message
+    let msg = format!(
+        "Select 2 commits to compare (Space: toggle)  Selected: {}/2",
+        state.selected_commits.len()
+    );
+    let msg_area = Rect::new(inner.x + 1, inner.y, inner.width - 2, 1);
+    frame.render_widget(
+        Paragraph::new(msg).style(Style::default().fg(theme.dialog.git_log_diff_message_text)),
+        msg_area,
+    );
+
+    // Commit list area
+    let list_height = (inner.height - 3) as usize; // header + blank + buttons
+    let visible_entries: Vec<(usize, &crate::ui::git_screen::GitLogEntry)> = state.log_entries
+        .iter()
+        .enumerate()
+        .skip(state.scroll_offset)
+        .take(list_height)
+        .collect();
+
+    let max_entry_width = (inner.width - 2) as usize;
+
+    for (i, (idx, entry)) in visible_entries.iter().enumerate() {
+        let y = inner.y + 1 + i as u16;
+        let is_selected = state.selected_commits.contains(&entry.hash);
+        let is_cursor = *idx == state.selected_index;
+
+        let check = if is_selected { "[*] " } else { "[ ] " };
+        let refs_part = if entry.refs.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", entry.refs)
+        };
+        let line_text = format!(
+            "{}{} {} - {} {}{}",
+            check, entry.hash, entry.message, entry.author, entry.date, refs_part
+        );
+
+        // Truncate to fit
+        let display_text = if line_text.len() > max_entry_width {
+            safe_prefix(&line_text, max_entry_width).to_string()
+        } else {
+            line_text
+        };
+
+        let style = if is_cursor {
+            Style::default()
+                .fg(theme.dialog.git_log_diff_cursor_text)
+                .bg(theme.dialog.git_log_diff_cursor_bg)
+        } else if is_selected {
+            Style::default().fg(theme.dialog.git_log_diff_selected_text)
+        } else {
+            Style::default().fg(theme.dialog.git_log_diff_entry_text)
+        };
+
+        // Pad to full width for cursor background
+        let padded = if is_cursor {
+            format!("{:<width$}", display_text, width = max_entry_width)
+        } else {
+            display_text
+        };
+
+        frame.render_widget(
+            Paragraph::new(padded).style(style),
+            Rect::new(inner.x + 1, y, inner.width - 2, 1),
+        );
+    }
+
+    // Scroll info
+    if state.log_entries.len() > list_height {
+        let scroll_info = format!(
+            "[{}-{}/{}]",
+            state.scroll_offset + 1,
+            (state.scroll_offset + list_height).min(state.log_entries.len()),
+            state.log_entries.len()
+        );
+        let info_len = scroll_info.len() as u16;
+        let info_x = inner.x + inner.width - info_len - 1;
+        frame.render_widget(
+            Paragraph::new(scroll_info).style(Style::default().fg(theme.dialog.git_log_diff_scroll_info)),
+            Rect::new(info_x, inner.y, info_len, 1),
+        );
+    }
+
+    // Buttons
+    let button_y = inner.y + inner.height - 1;
+    let has_two = state.selected_commits.len() == 2;
+
+    let btn_compare = " Compare ";
+    let btn_cancel = " Cancel ";
+
+    let compare_style = if !has_two {
+        Style::default().fg(theme.dialog.git_log_diff_button_disabled_text)
+    } else if dialog.selected_button == 0 {
+        Style::default()
+            .fg(theme.dialog.git_log_diff_button_selected_text)
+            .bg(theme.dialog.git_log_diff_button_selected_bg)
+    } else {
+        Style::default().fg(theme.dialog.git_log_diff_button_text)
+    };
+
+    let cancel_style = if dialog.selected_button == 1 {
+        Style::default()
+            .fg(theme.dialog.git_log_diff_button_selected_text)
+            .bg(theme.dialog.git_log_diff_button_selected_bg)
+    } else {
+        Style::default().fg(theme.dialog.git_log_diff_button_text)
+    };
+
+    let btn_width = btn_compare.len() + btn_cancel.len() + 4;
+    let btn_start = inner.x + (inner.width - btn_width as u16) / 2;
+
+    frame.render_widget(
+        Paragraph::new(btn_compare).style(compare_style),
+        Rect::new(btn_start, button_y, btn_compare.len() as u16, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(btn_cancel).style(cancel_style),
+        Rect::new(btn_start + btn_compare.len() as u16 + 4, button_y, btn_cancel.len() as u16, 1),
+    );
+}
+
+/// Handle input for Git Log Diff dialog
+fn handle_git_log_diff_input(app: &mut App, code: KeyCode) -> bool {
+    // Extract button state before mutable borrow
+    let selected_button = app.dialog.as_ref().map(|d| d.selected_button).unwrap_or(0);
+
+    match code {
+        KeyCode::Up => {
+            if let Some(ref mut state) = app.git_log_diff_state {
+                if state.selected_index > 0 {
+                    state.selected_index -= 1;
+                    if state.selected_index < state.scroll_offset {
+                        state.scroll_offset = state.selected_index;
+                    }
+                }
+            }
+        }
+        KeyCode::Down => {
+            if let Some(ref mut state) = app.git_log_diff_state {
+                if state.selected_index + 1 < state.log_entries.len() {
+                    state.selected_index += 1;
+                    let vh = state.visible_height.max(1);
+                    if state.selected_index >= state.scroll_offset + vh {
+                        state.scroll_offset = state.selected_index - vh + 1;
+                    }
+                }
+            }
+        }
+        KeyCode::PageUp => {
+            if let Some(ref mut state) = app.git_log_diff_state {
+                let page = state.visible_height.max(1);
+                state.selected_index = state.selected_index.saturating_sub(page);
+                if state.selected_index < state.scroll_offset {
+                    state.scroll_offset = state.selected_index;
+                }
+            }
+        }
+        KeyCode::PageDown => {
+            if let Some(ref mut state) = app.git_log_diff_state {
+                let page = state.visible_height.max(1);
+                state.selected_index = (state.selected_index + page).min(state.log_entries.len().saturating_sub(1));
+                let vh = state.visible_height.max(1);
+                if state.selected_index >= state.scroll_offset + vh {
+                    state.scroll_offset = state.selected_index - vh + 1;
+                }
+            }
+        }
+        KeyCode::Home => {
+            if let Some(ref mut state) = app.git_log_diff_state {
+                state.selected_index = 0;
+                state.scroll_offset = 0;
+            }
+        }
+        KeyCode::End => {
+            if let Some(ref mut state) = app.git_log_diff_state {
+                state.selected_index = state.log_entries.len().saturating_sub(1);
+                let vh = state.visible_height.max(1);
+                if state.selected_index >= vh {
+                    state.scroll_offset = state.selected_index - vh + 1;
+                }
+            }
+        }
+        KeyCode::Char(' ') => {
+            if let Some(ref mut state) = app.git_log_diff_state {
+                if state.selected_index < state.log_entries.len() {
+                    let hash = state.log_entries[state.selected_index].hash.clone();
+                    if let Some(pos) = state.selected_commits.iter().position(|h| h == &hash) {
+                        state.selected_commits.remove(pos);
+                    } else {
+                        if state.selected_commits.len() >= 2 {
+                            state.selected_commits.remove(0);
+                        }
+                        state.selected_commits.push(hash);
+                    }
+                }
+            }
+        }
+        KeyCode::Tab | KeyCode::Left | KeyCode::Right | KeyCode::BackTab => {
+            if let Some(ref mut dialog) = app.dialog {
+                dialog.selected_button = if dialog.selected_button == 0 { 1 } else { 0 };
+            }
+        }
+        KeyCode::Enter => {
+            if selected_button == 0 {
+                // Compare
+                let has_two = app.git_log_diff_state.as_ref()
+                    .map(|s| s.selected_commits.len() == 2)
+                    .unwrap_or(false);
+                if has_two {
+                    app.execute_git_log_diff();
+                    return false;
+                }
+            } else {
+                // Cancel
+                app.git_log_diff_state = None;
+                app.dialog = None;
+            }
+            return false;
+        }
+        KeyCode::Esc => {
+            app.git_log_diff_state = None;
+            app.dialog = None;
+            return false;
+        }
+        _ => {}
+    }
+    false
 }
 
 #[cfg(test)]

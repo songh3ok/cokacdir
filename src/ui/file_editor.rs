@@ -191,6 +191,9 @@ pub struct EditorState {
     // Esc 두 번 누르기 상태
     pub pending_exit: bool,
 
+    // Word wrap 모드
+    pub word_wrap: bool,
+
     // 화면 크기 (렌더링 시 업데이트)
     pub visible_height: usize,
     pub visible_width: usize,
@@ -262,6 +265,7 @@ impl EditorState {
             cursors: Vec::new(),
             last_word_selection: None,
             pending_exit: false,
+            word_wrap: false,
             visible_height: 20,  // 기본값, 렌더링 시 업데이트됨
             visible_width: 80,   // 기본값, 렌더링 시 업데이트됨
             message: None,
@@ -1200,20 +1204,74 @@ impl EditorState {
         }
     }
 
+    /// Word wrap 모드에서 논리적 줄이 차지하는 시각적 행 수 계산
+    fn count_wrapped_rows(&self, line_idx: usize) -> usize {
+        if line_idx >= self.lines.len() || self.visible_width == 0 {
+            return 1;
+        }
+        let (expanded, _) = self.expand_tabs_with_mapping(&self.lines[line_idx]);
+        if expanded.is_empty() {
+            return 1;
+        }
+        Self::compute_wrap_segments(&expanded, self.visible_width).len()
+    }
+
+    /// 확장된 줄을 visual column 기준으로 세그먼트로 분할
+    /// 반환: 각 세그먼트의 시작 visual column 위치 목록
+    fn compute_wrap_segments(expanded_line: &str, max_width: usize) -> Vec<usize> {
+        if expanded_line.is_empty() || max_width == 0 {
+            return vec![0];
+        }
+        let mut segments = vec![0usize];
+        let mut current_width = 0usize;
+        let mut seg_start = 0usize;
+        for ch in expanded_line.chars() {
+            let w = UnicodeWidthChar::width(ch).unwrap_or(1);
+            if current_width + w > max_width && current_width > 0 {
+                seg_start += current_width;
+                segments.push(seg_start);
+                current_width = w;
+            } else {
+                current_width += w;
+            }
+        }
+        segments
+    }
+
     /// 스크롤 업데이트
     pub fn update_scroll(&mut self) {
-        if self.cursor_line < self.scroll {
-            self.scroll = self.cursor_line;
-        } else if self.cursor_line >= self.scroll + self.visible_height {
-            self.scroll = self.cursor_line.saturating_sub(self.visible_height - 1);
-        }
+        if self.word_wrap {
+            self.horizontal_scroll = 0;
 
-        // 수평 스크롤 (visual column 기반)
-        let cursor_visual = self.cursor_visual_col();
-        if cursor_visual < self.horizontal_scroll {
-            self.horizontal_scroll = cursor_visual;
-        } else if cursor_visual >= self.horizontal_scroll + self.visible_width {
-            self.horizontal_scroll = cursor_visual.saturating_sub(self.visible_width - 1);
+            if self.cursor_line < self.scroll {
+                self.scroll = self.cursor_line;
+            }
+
+            // cursor_line까지의 시각적 줄 수 계산
+            let mut visual_rows = 0;
+            let end = self.cursor_line.min(self.lines.len().saturating_sub(1));
+            for line_idx in self.scroll..=end {
+                visual_rows += self.count_wrapped_rows(line_idx);
+            }
+            // 초과 시 scroll 증가
+            while visual_rows > self.visible_height && self.scroll < self.cursor_line {
+                visual_rows -= self.count_wrapped_rows(self.scroll);
+                self.scroll += 1;
+            }
+        } else {
+            if self.cursor_line < self.scroll {
+                self.scroll = self.cursor_line;
+            } else if self.cursor_line >= self.scroll + self.visible_height {
+                self.scroll = self.cursor_line.saturating_sub(self.visible_height - 1);
+            }
+
+            // 수평 스크롤 (visual column 기반)
+            let cursor_visual = self.cursor_visual_col();
+            if cursor_visual < self.horizontal_scroll {
+                self.horizontal_scroll = cursor_visual;
+            } else if cursor_visual >= self.horizontal_scroll + self.visible_width {
+                self.horizontal_scroll = cursor_visual.saturating_sub(self.visible_width - 1);
+            }
         }
     }
 
@@ -2224,50 +2282,148 @@ pub fn draw(frame: &mut Frame, state: &mut EditorState, area: Rect, theme: &Them
         }
     }
 
-    for (i, original_line) in state.lines.iter().skip(state.scroll).take(content_height).enumerate() {
-        // TAB을 visual column 기반으로 스페이스로 확장 (매핑 정보 포함)
-        let (expanded_line, visual_to_orig) = state.expand_tabs_with_mapping(original_line);
-        let line_num = state.scroll + i;
-        let is_cursor_line = line_num == state.cursor_line;
-
-        // 줄 번호
-        let line_num_style = if is_cursor_line {
-            Style::default()
-                .fg(theme.editor.line_number)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.editor.line_number)
-        };
-
-        let line_num_span = Span::styled(
-            format!("{:>width$} ", line_num + 1, width = line_num_width),
-            line_num_style,
-        );
-
-        // 라인 렌더링
+    if state.word_wrap {
+        // Word wrap 모드: 논리적 줄을 시각적 세그먼트로 분할하여 렌더링
+        let content_width = state.visible_width;
         let in_find_mode = state.find_mode != FindReplaceMode::None;
-        let content_spans = render_editor_line(
-            &expanded_line,
-            original_line,
-            &visual_to_orig,
-            line_num,
-            state,
-            &selection,
-            &mut highlighter,
-            theme,
-            is_cursor_line,
-            in_find_mode,
-            state.horizontal_scroll,
-            state.visible_width,
-        );
+        let mut visual_row: usize = 0;
+        let mut line_idx = state.scroll;
 
-        let mut spans = vec![line_num_span];
-        spans.extend(content_spans);
+        while visual_row < content_height && line_idx < state.lines.len() {
+            let original_line = &state.lines[line_idx];
+            let (expanded_line, visual_to_orig) = state.expand_tabs_with_mapping(original_line);
+            let is_cursor_line = line_idx == state.cursor_line;
 
-        frame.render_widget(
-            Paragraph::new(Line::from(spans)),
-            Rect::new(inner.x, inner.y + 1 + i as u16, inner.width, 1),
-        );
+            // 하이라이터로 토큰화 (논리적 줄당 1회만)
+            let orig_chars: Vec<char> = original_line.chars().collect();
+            let orig_styles: Vec<ratatui::style::Style> = if let Some(ref mut hl) = highlighter {
+                let tokens = hl.tokenize_line(original_line);
+                if !tokens.is_empty() {
+                    let mut styles = vec![theme.normal_style(); orig_chars.len()];
+                    let mut char_idx = 0;
+                    for token in &tokens {
+                        let token_len = token.text.chars().count();
+                        let style = hl.style_for(token.token_type);
+                        for i in char_idx..(char_idx + token_len).min(orig_chars.len()) {
+                            styles[i] = style;
+                        }
+                        char_idx += token_len;
+                    }
+                    styles
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            };
+
+            // 줄을 visual column 기준 세그먼트로 분할
+            let seg_starts = EditorState::compute_wrap_segments(&expanded_line, content_width);
+
+            for (seg_idx, &seg_start_visual) in seg_starts.iter().enumerate() {
+                if visual_row >= content_height {
+                    break;
+                }
+
+                let is_first = seg_idx == 0;
+
+                // 줄 번호: 첫 세그먼트만 표시
+                let line_num_style = if is_cursor_line {
+                    Style::default()
+                        .fg(theme.editor.line_number)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.editor.line_number)
+                };
+
+                let line_num_span = if is_first {
+                    Span::styled(
+                        format!("{:>width$} ", line_idx + 1, width = line_num_width),
+                        line_num_style,
+                    )
+                } else {
+                    Span::styled(
+                        format!("{:>width$} ", "", width = line_num_width),
+                        line_num_style,
+                    )
+                };
+
+                let content_spans = render_editor_line(
+                    &expanded_line,
+                    original_line,
+                    &visual_to_orig,
+                    line_idx,
+                    state,
+                    &selection,
+                    &mut None, // 하이라이터 건너뜀 (이미 토큰화됨)
+                    theme,
+                    is_cursor_line,
+                    in_find_mode,
+                    seg_start_visual,
+                    content_width,
+                    Some(&orig_styles),
+                );
+
+                let mut spans = vec![line_num_span];
+                spans.extend(content_spans);
+
+                frame.render_widget(
+                    Paragraph::new(Line::from(spans)),
+                    Rect::new(inner.x, inner.y + 1 + visual_row as u16, inner.width, 1),
+                );
+
+                visual_row += 1;
+            }
+
+            line_idx += 1;
+        }
+    } else {
+        for (i, original_line) in state.lines.iter().skip(state.scroll).take(content_height).enumerate() {
+            // TAB을 visual column 기반으로 스페이스로 확장 (매핑 정보 포함)
+            let (expanded_line, visual_to_orig) = state.expand_tabs_with_mapping(original_line);
+            let line_num = state.scroll + i;
+            let is_cursor_line = line_num == state.cursor_line;
+
+            // 줄 번호
+            let line_num_style = if is_cursor_line {
+                Style::default()
+                    .fg(theme.editor.line_number)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.editor.line_number)
+            };
+
+            let line_num_span = Span::styled(
+                format!("{:>width$} ", line_num + 1, width = line_num_width),
+                line_num_style,
+            );
+
+            // 라인 렌더링
+            let in_find_mode = state.find_mode != FindReplaceMode::None;
+            let content_spans = render_editor_line(
+                &expanded_line,
+                original_line,
+                &visual_to_orig,
+                line_num,
+                state,
+                &selection,
+                &mut highlighter,
+                theme,
+                is_cursor_line,
+                in_find_mode,
+                state.horizontal_scroll,
+                state.visible_width,
+                None,
+            );
+
+            let mut spans = vec![line_num_span];
+            spans.extend(content_spans);
+
+            frame.render_widget(
+                Paragraph::new(Line::from(spans)),
+                Rect::new(inner.x, inner.y + 1 + i as u16, inner.width, 1),
+            );
+        }
     }
 
     // 스크롤바
@@ -2310,6 +2466,11 @@ pub fn draw(frame: &mut Frame, state: &mut EditorState, area: Rect, theme: &Them
             } else {
                 let mut footer_spans = vec![];
 
+                // Word wrap 표시자
+                if state.word_wrap {
+                    footer_spans.push(Span::styled("Wrap ", Style::default().fg(theme.editor.wrap_indicator)));
+                }
+
                 // 단축키 안내
                 let shortcuts = [
                     ("^S", " save "),
@@ -2319,6 +2480,7 @@ pub fn draw(frame: &mut Frame, state: &mut EditorState, area: Rect, theme: &Them
                     ("^D", " select "),
                     ("^F", " find "),
                     ("^G", " goto "),
+                    ("^W", " wrap "),
                     ("Esc", " exit"),
                 ];
 
@@ -2490,14 +2652,15 @@ fn render_editor_line(
     in_find_mode: bool,
     horizontal_scroll: usize,
     visible_width: usize,
+    pre_computed_styles: Option<&Vec<ratatui::style::Style>>,
 ) -> Vec<Span<'static>> {
     let chars: Vec<char> = expanded_line.chars().collect();
     let orig_chars: Vec<char> = original_line.chars().collect();
     let mut spans: Vec<Span<'static>> = Vec::new();
 
-    // 보이는 범위 계산 (visual column 기준)
+    // 보이는 범위 (visual column 기준)
     let view_start = horizontal_scroll;
-    let view_end = (horizontal_scroll + visible_width).min(chars.len());
+    let view_end = horizontal_scroll + visible_width;
 
     // 커서의 visual column 계산
     let cursor_visual = state.char_to_visual(original_line, state.cursor_col);
@@ -2515,42 +2678,64 @@ fn render_editor_line(
         None
     };
 
-    // 문법 강조 토큰 가져오기 (원본 라인에서 토큰화)
-    let tokens = if let Some(ref mut hl) = highlighter {
-        hl.tokenize_line(original_line)
+    // 문법 강조: pre_computed_styles가 있으면 토큰화 건너뜀
+    let orig_styles: Vec<ratatui::style::Style> = if let Some(pcs) = pre_computed_styles {
+        pcs.clone()
     } else {
-        vec![]
+        // 문법 강조 토큰 가져오기 (원본 라인에서 토큰화)
+        let tokens = if let Some(ref mut hl) = highlighter {
+            hl.tokenize_line(original_line)
+        } else {
+            vec![]
+        };
+
+        // 원본 char index -> token style 매핑 생성
+        if !tokens.is_empty() {
+            let mut styles = vec![theme.normal_style(); orig_chars.len()];
+            let mut char_idx = 0;
+            for token in &tokens {
+                let token_len = token.text.chars().count();
+                let style = if let Some(ref mut hl) = highlighter {
+                    hl.style_for(token.token_type)
+                } else {
+                    theme.normal_style()
+                };
+                for i in char_idx..(char_idx + token_len).min(orig_chars.len()) {
+                    styles[i] = style;
+                }
+                char_idx += token_len;
+            }
+            styles
+        } else {
+            vec![]
+        }
     };
 
-    // 토큰이 있으면 토큰 기반 렌더링
-    if !tokens.is_empty() {
-        // 원본 char index -> token style 매핑 생성
-        let mut orig_styles: Vec<ratatui::style::Style> = vec![theme.normal_style(); orig_chars.len()];
-        let mut char_idx = 0;
+    // 문자를 순회하면서 visual column 누적 — CJK 전각 문자 올바르게 처리
+    let mut visual_col = 0; // 현재 문자의 visual column 시작 위치
+    let mut vis_idx = 0;    // visual_to_orig 인덱스
 
-        for token in &tokens {
-            let token_len = token.text.chars().count();
-            let style = if let Some(ref mut hl) = highlighter {
-                hl.style_for(token.token_type)
-            } else {
-                theme.normal_style()
-            };
-            for i in char_idx..(char_idx + token_len).min(orig_chars.len()) {
-                orig_styles[i] = style;
-            }
-            char_idx += token_len;
+    for (_char_idx, c) in chars.iter().enumerate() {
+        let char_width = UnicodeWidthChar::width(*c).unwrap_or(1);
+        let char_visual_start = visual_col;
+        let char_visual_end = visual_col + char_width;
+
+        // 이 문자가 보이는 영역을 벗어나면 종료
+        if char_visual_start >= view_end {
+            break;
         }
 
-        // visual position 순회
-        for visual_pos in view_start..view_end {
-            let c = chars[visual_pos];
-            let orig_idx = if visual_pos < visual_to_orig.len() {
-                visual_to_orig[visual_pos]
+        // 이 문자가 보이는 영역과 겹치는 경우만 렌더링
+        if char_visual_end > view_start {
+            // visual_to_orig에서 원본 인덱스
+            let orig_idx = if vis_idx < visual_to_orig.len() {
+                visual_to_orig[vis_idx]
             } else {
                 orig_chars.len()
             };
 
-            let mut style = if orig_idx < orig_styles.len() {
+            // 기본 스타일 결정
+            let mut style = if !orig_styles.is_empty() && orig_idx < orig_styles.len() {
                 orig_styles[orig_idx]
             } else {
                 theme.normal_style()
@@ -2581,8 +2766,8 @@ fn render_editor_line(
                 }
             }
 
-            // 커서 하이라이트 (visual position 기준)
-            if is_cursor_line && visual_pos == cursor_visual && state.selection.is_none() {
+            // 커서 하이라이트 (visual column 기준)
+            if is_cursor_line && char_visual_start == cursor_visual && state.selection.is_none() {
                 if in_find_mode {
                     style = Style::default().fg(theme.editor.text).bg(theme.editor.footer_bg);
                 } else {
@@ -2590,78 +2775,31 @@ fn render_editor_line(
                 }
             }
 
-            spans.push(Span::styled(c.to_string(), style));
-        }
-
-        // 커서가 줄 끝에 있고 보이는 범위 내인 경우
-        if is_cursor_line && state.cursor_col >= orig_chars.len() && state.selection.is_none() {
-            if cursor_visual >= view_start && cursor_visual < view_start + visible_width {
-                let cursor_style = if in_find_mode {
-                    Style::default().fg(theme.editor.text).bg(theme.editor.footer_bg)
-                } else {
-                    theme.selected_style()
-                };
-                spans.push(Span::styled(" ", cursor_style));
+            // 전각 문자가 왼쪽 경계에 걸리는 경우: 공백으로 대체
+            if char_visual_start < view_start && char_width == 2 {
+                spans.push(Span::styled(" ", style));
             }
-        }
-    } else {
-        // 토큰 없이 문자 단위 렌더링 (보이는 범위만)
-        for visual_pos in view_start..view_end {
-            let c = chars[visual_pos];
-            let orig_idx = if visual_pos < visual_to_orig.len() {
-                visual_to_orig[visual_pos]
+            // 전각 문자가 오른쪽 경계에 걸리는 경우: 공백으로 대체
+            else if char_visual_end > view_end && char_width == 2 {
+                spans.push(Span::styled(" ", style));
             } else {
-                orig_chars.len()
-            };
-            let mut style = theme.normal_style();
-
-            // 선택 영역 (원본 인덱스 기준)
-            if let Some((sel_start, sel_end)) = line_selection {
-                if orig_idx >= sel_start && orig_idx < sel_end {
-                    style = style.bg(theme.editor.selection_bg).fg(theme.editor.selection_text);
-                }
+                spans.push(Span::styled(c.to_string(), style));
             }
-
-            // 검색 매치 (원본 인덱스 기준)
-            for (idx, (ml, ms, me)) in state.match_positions.iter().enumerate() {
-                if *ml == line_num && orig_idx >= *ms && orig_idx < *me {
-                    if idx == state.current_match {
-                        style = style.bg(theme.editor.match_current_bg).fg(theme.editor.bg);
-                    } else {
-                        style = style.bg(theme.editor.match_bg).fg(theme.editor.bg);
-                    }
-                }
-            }
-
-            // 매칭 괄호 (원본 인덱스 기준)
-            if let Some((bl, bc)) = state.matching_bracket {
-                if bl == line_num && bc == orig_idx {
-                    style = style.bg(theme.editor.bracket_match).fg(Color::Black);
-                }
-            }
-
-            // 커서 (visual position 기준)
-            if is_cursor_line && visual_pos == cursor_visual && state.selection.is_none() {
-                if in_find_mode {
-                    style = Style::default().fg(theme.editor.text).bg(theme.editor.footer_bg);
-                } else {
-                    style = theme.selected_style();
-                }
-            }
-
-            spans.push(Span::styled(c.to_string(), style));
         }
 
-        // 커서가 줄 끝에 있고 보이는 범위 내인 경우
-        if is_cursor_line && state.cursor_col >= orig_chars.len() && state.selection.is_none() {
-            if cursor_visual >= view_start && cursor_visual < view_start + visible_width {
-                let cursor_style = if in_find_mode {
-                    Style::default().fg(theme.editor.text).bg(theme.editor.footer_bg)
-                } else {
-                    theme.selected_style()
-                };
-                spans.push(Span::styled(" ", cursor_style));
-            }
+        visual_col += char_width;
+        vis_idx += char_width; // visual_to_orig는 visual column 단위
+    }
+
+    // 커서가 줄 끝에 있고 보이는 범위 내인 경우
+    if is_cursor_line && state.cursor_col >= orig_chars.len() && state.selection.is_none() {
+        if cursor_visual >= view_start && cursor_visual < view_end {
+            let cursor_style = if in_find_mode {
+                Style::default().fg(theme.editor.text).bg(theme.editor.footer_bg)
+            } else {
+                theme.selected_style()
+            };
+            spans.push(Span::styled(" ", cursor_style));
         }
     }
 
@@ -2920,6 +3058,14 @@ pub fn handle_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             }
             KeyCode::Char('v') => {
                 state.paste();
+                return;
+            }
+            KeyCode::Char('w') => {
+                // Ctrl+W: word wrap 토글
+                state.word_wrap = !state.word_wrap;
+                if state.word_wrap {
+                    state.horizontal_scroll = 0;
+                }
                 return;
             }
             KeyCode::Char('k') => {

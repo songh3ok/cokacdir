@@ -649,25 +649,49 @@ pub fn draw(frame: &mut Frame, state: &mut ViewerState, area: Rect, theme: &Them
                 vec![Span::styled(line.clone(), line_bg_style)]
             };
 
-            // 수평 스크롤 적용 (display width 기준)
+            // 수평 스크롤 적용 (display width 기준, span별 개별 처리)
             let final_spans = if state.horizontal_scroll > 0 {
-                // Skip characters until we've skipped horizontal_scroll display width
-                let mut skipped_width = 0;
-                let mut skip_chars = 0;
-                for c in line.chars() {
-                    if skipped_width >= state.horizontal_scroll {
+                let mut result_spans: Vec<Span> = Vec::new();
+                let mut remaining_skip = state.horizontal_scroll;
+                let mut total_rendered_width = 0usize;
+
+                for span in &content_spans {
+                    if total_rendered_width >= content_width {
                         break;
                     }
-                    skipped_width += c.width().unwrap_or(1);
-                    skip_chars += 1;
+                    let span_text = &span.content;
+                    let mut visible_text = String::new();
+
+                    for c in span_text.chars() {
+                        let cw = c.width().unwrap_or(1);
+                        if remaining_skip > 0 {
+                            if cw <= remaining_skip {
+                                remaining_skip -= cw;
+                            } else {
+                                // 전각 문자가 스크롤 경계에 걸림 — 공백으로 대체
+                                visible_text.push(' ');
+                                total_rendered_width += 1;
+                                remaining_skip = 0;
+                            }
+                            continue;
+                        }
+                        if total_rendered_width + cw > content_width {
+                            // 전각 문자가 우측 경계에 걸리면 공백 패딩
+                            if total_rendered_width + 1 <= content_width {
+                                visible_text.push(' ');
+                                total_rendered_width += 1;
+                            }
+                            break;
+                        }
+                        visible_text.push(c);
+                        total_rendered_width += cw;
+                    }
+
+                    if !visible_text.is_empty() {
+                        result_spans.push(Span::styled(visible_text, span.style));
+                    }
                 }
-                let display_line: String = line.chars().skip(skip_chars).collect();
-                if content_spans.len() == 1 {
-                    vec![Span::styled(display_line, content_spans[0].style)]
-                } else {
-                    // 복잡한 spans의 경우 단순화
-                    vec![Span::styled(display_line, line_bg_style)]
-                }
+                result_spans
             } else {
                 content_spans
             };

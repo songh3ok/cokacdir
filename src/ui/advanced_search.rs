@@ -8,6 +8,7 @@ use ratatui::{
 };
 
 use super::theme::Theme;
+use crate::utils::format::pad_to_display_width;
 
 #[derive(Debug, Clone)]
 pub struct SearchCriteria {
@@ -172,7 +173,7 @@ pub fn draw(frame: &mut Frame, state: &AdvancedSearchState, area: Rect, theme: &
             ),
             Span::styled("[", Style::default().fg(theme.advanced_search.field_bracket)),
             Span::styled(
-                format!("{:12}", value),
+                pad_to_display_width(value, 12),
                 if is_active {
                     theme.selected_style()
                 } else {

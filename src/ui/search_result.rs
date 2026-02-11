@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use chrono::{DateTime, Local};
 use crossterm::event::KeyCode;
+use unicode_width::UnicodeWidthStr;
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
@@ -274,12 +275,13 @@ pub fn draw(
             item.relative_path.clone()
         };
 
-        // 경로가 너무 길면 앞부분을 ...로 생략
-        let path_str = if path_display.len() > path_width {
-            let suffix = safe_suffix(&path_display, path_width.saturating_sub(3));
-            format!("{:.<width$}", suffix, width = path_width)
+        // 경로가 너무 길면 앞부분을 ...로 생략 (표시 너비 기준)
+        let path_str = if path_display.width() > path_width {
+            let suffix = crate::utils::format::display_width_suffix(&path_display, path_width.saturating_sub(3));
+            let with_ellipsis = format!("...{}", suffix);
+            crate::utils::format::pad_to_display_width(&with_ellipsis, path_width)
         } else {
-            format!("{:<width$}", path_display, width = path_width)
+            crate::utils::format::pad_to_display_width(&path_display, path_width)
         };
 
         // 크기

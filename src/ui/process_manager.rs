@@ -1,4 +1,5 @@
 use crossterm::event::KeyCode;
+use unicode_width::UnicodeWidthStr;
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
@@ -8,6 +9,7 @@ use ratatui::{
 };
 
 use super::{app::{App, Screen}, theme::Theme};
+use crate::utils::format::pad_to_display_width;
 use crate::services::process::{self, SortField};
 
 pub fn draw(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
@@ -92,7 +94,7 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         let line = Line::from(vec![
             Span::styled(format!("{:width$}", proc.pid, width = pid_width as usize), style),
             Span::styled(
-                format!("{:width$}", truncate(&proc.user, user_width as usize - 1), width = user_width as usize),
+                pad_to_display_width(&truncate(&proc.user, user_width as usize - 1), user_width as usize),
                 style,
             ),
             Span::styled(format!("{:>width$.1}", proc.cpu, width = cpu_width as usize), style),
@@ -183,13 +185,8 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     );
 }
 
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.chars().count() > max_len {
-        let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();
-        format!("{}...", truncated)
-    } else {
-        s.to_string()
-    }
+fn truncate(s: &str, max_width: usize) -> String {
+    crate::utils::format::truncate_with_ellipsis(s, max_width)
 }
 
 pub fn handle_input(app: &mut App, code: KeyCode) {

@@ -58,6 +58,8 @@ pub struct ThemeJson {
     pub diff: DiffColorsJson,
     #[serde(default)]
     pub diff_file_view: DiffFileViewColorsJson,
+    #[serde(default)]
+    pub git_screen: GitScreenColorsJson,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -248,6 +250,32 @@ pub struct DialogColorsJson {
     pub tar_exclude_button_selected_bg: u8,
     #[serde(default = "default_231")]
     pub tar_exclude_button_selected_text: u8,
+    #[serde(default = "default_238")]
+    pub git_log_diff_title: u8,
+    #[serde(default = "default_238")]
+    pub git_log_diff_border: u8,
+    #[serde(default = "default_255")]
+    pub git_log_diff_bg: u8,
+    #[serde(default = "default_243")]
+    pub git_log_diff_message_text: u8,
+    #[serde(default = "default_243")]
+    pub git_log_diff_entry_text: u8,
+    #[serde(default = "default_34")]
+    pub git_log_diff_selected_text: u8,
+    #[serde(default = "default_231")]
+    pub git_log_diff_cursor_text: u8,
+    #[serde(default = "default_67")]
+    pub git_log_diff_cursor_bg: u8,
+    #[serde(default = "default_251")]
+    pub git_log_diff_button_text: u8,
+    #[serde(default = "default_231")]
+    pub git_log_diff_button_selected_text: u8,
+    #[serde(default = "default_67")]
+    pub git_log_diff_button_selected_bg: u8,
+    #[serde(default = "default_251")]
+    pub git_log_diff_button_disabled_text: u8,
+    #[serde(default = "default_251")]
+    pub git_log_diff_scroll_info: u8,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -348,6 +376,8 @@ pub struct EditorColorsJson {
     pub find_option: u8,
     #[serde(default = "default_74")]
     pub find_option_active: u8,
+    #[serde(default = "default_248")]
+    pub wrap_indicator: u8,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -802,6 +832,62 @@ pub struct DiffFileViewColorsJson {
     pub footer_text: u8,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct GitScreenColorsJson {
+    #[serde(default = "default_234")]
+    pub bg: u8,
+    #[serde(default = "default_102")]
+    pub border: u8,
+    #[serde(default = "default_108")]
+    pub header_branch: u8,
+    #[serde(default = "default_188")]
+    pub header_path: u8,
+    #[serde(default = "default_110")]
+    pub tab_active: u8,
+    #[serde(default = "default_102")]
+    pub tab_inactive: u8,
+    #[serde(default = "default_235")]
+    pub tab_bar_bg: u8,
+    #[serde(default = "default_108")]
+    pub file_staged: u8,
+    #[serde(default = "default_180")]
+    pub file_modified: u8,
+    #[serde(default = "default_174")]
+    pub file_untracked: u8,
+    #[serde(default = "default_167")]
+    pub file_deleted: u8,
+    #[serde(default = "default_239")]
+    pub selected_bg: u8,
+    #[serde(default = "default_195")]
+    pub selected_text: u8,
+    #[serde(default = "default_146")]
+    pub footer_key: u8,
+    #[serde(default = "default_102")]
+    pub footer_text: u8,
+    #[serde(default = "default_102")]
+    pub commit_input_border: u8,
+    #[serde(default = "default_188")]
+    pub commit_input_text: u8,
+    #[serde(default = "default_146")]
+    pub log_hash: u8,
+    #[serde(default = "default_188")]
+    pub log_message: u8,
+    #[serde(default = "default_110")]
+    pub log_author: u8,
+    #[serde(default = "default_102")]
+    pub log_date: u8,
+    #[serde(default = "default_108")]
+    pub branch_current: u8,
+    #[serde(default = "default_188")]
+    pub branch_normal: u8,
+    #[serde(default = "default_108")]
+    pub diff_add: u8,
+    #[serde(default = "default_174")]
+    pub diff_remove: u8,
+    #[serde(default = "default_110")]
+    pub diff_header: u8,
+}
+
 // 기본값 함수들
 fn default_21() -> u8 { 21 }
 fn default_22() -> u8 { 22 }
@@ -847,6 +933,15 @@ fn default_251() -> u8 { 251 }
 fn default_253() -> u8 { 253 }
 fn default_254() -> u8 { 254 }
 fn default_255() -> u8 { 255 }
+fn default_108() -> u8 { 108 }
+fn default_110() -> u8 { 110 }
+fn default_167() -> u8 { 167 }
+fn default_174() -> u8 { 174 }
+fn default_180() -> u8 { 180 }
+fn default_188() -> u8 { 188 }
+fn default_195() -> u8 { 195 }
+fn default_146() -> u8 { 146 }
+fn default_234() -> u8 { 234 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 테마 로딩 함수
@@ -1019,6 +1114,19 @@ pub fn theme_from_json(json: &ThemeJson) -> Theme {
         tar_exclude_button_text: idx(json.dialog.tar_exclude_button_text),
         tar_exclude_button_selected_bg: idx(json.dialog.tar_exclude_button_selected_bg),
         tar_exclude_button_selected_text: idx(json.dialog.tar_exclude_button_selected_text),
+        git_log_diff_title: idx(json.dialog.git_log_diff_title),
+        git_log_diff_border: idx(json.dialog.git_log_diff_border),
+        git_log_diff_bg: idx(json.dialog.git_log_diff_bg),
+        git_log_diff_message_text: idx(json.dialog.git_log_diff_message_text),
+        git_log_diff_entry_text: idx(json.dialog.git_log_diff_entry_text),
+        git_log_diff_selected_text: idx(json.dialog.git_log_diff_selected_text),
+        git_log_diff_cursor_text: idx(json.dialog.git_log_diff_cursor_text),
+        git_log_diff_cursor_bg: idx(json.dialog.git_log_diff_cursor_bg),
+        git_log_diff_button_text: idx(json.dialog.git_log_diff_button_text),
+        git_log_diff_button_selected_text: idx(json.dialog.git_log_diff_button_selected_text),
+        git_log_diff_button_selected_bg: idx(json.dialog.git_log_diff_button_selected_bg),
+        git_log_diff_button_disabled_text: idx(json.dialog.git_log_diff_button_disabled_text),
+        git_log_diff_scroll_info: idx(json.dialog.git_log_diff_scroll_info),
     };
 
     let confirm_dialog = ConfirmDialogColors {
@@ -1064,6 +1172,7 @@ pub fn theme_from_json(json: &ThemeJson) -> Theme {
         find_input_text: idx(json.editor.find_input_text),
         find_option: idx(json.editor.find_option),
         find_option_active: idx(json.editor.find_option_active),
+        wrap_indicator: idx(json.editor.wrap_indicator),
     };
 
     let syntax = SyntaxColors {
@@ -1304,6 +1413,35 @@ pub fn theme_from_json(json: &ThemeJson) -> Theme {
         footer_text: idx(json.diff_file_view.footer_text),
     };
 
+    let git_screen = GitScreenColors {
+        bg: idx(json.git_screen.bg),
+        border: idx(json.git_screen.border),
+        header_branch: idx(json.git_screen.header_branch),
+        header_path: idx(json.git_screen.header_path),
+        tab_active: idx(json.git_screen.tab_active),
+        tab_inactive: idx(json.git_screen.tab_inactive),
+        tab_bar_bg: idx(json.git_screen.tab_bar_bg),
+        file_staged: idx(json.git_screen.file_staged),
+        file_modified: idx(json.git_screen.file_modified),
+        file_untracked: idx(json.git_screen.file_untracked),
+        file_deleted: idx(json.git_screen.file_deleted),
+        selected_bg: idx(json.git_screen.selected_bg),
+        selected_text: idx(json.git_screen.selected_text),
+        footer_key: idx(json.git_screen.footer_key),
+        footer_text: idx(json.git_screen.footer_text),
+        commit_input_border: idx(json.git_screen.commit_input_border),
+        commit_input_text: idx(json.git_screen.commit_input_text),
+        log_hash: idx(json.git_screen.log_hash),
+        log_message: idx(json.git_screen.log_message),
+        log_author: idx(json.git_screen.log_author),
+        log_date: idx(json.git_screen.log_date),
+        branch_current: idx(json.git_screen.branch_current),
+        branch_normal: idx(json.git_screen.branch_normal),
+        diff_add: idx(json.git_screen.diff_add),
+        diff_remove: idx(json.git_screen.diff_remove),
+        diff_header: idx(json.git_screen.diff_header),
+    };
+
     Theme {
         palette,
         state,
@@ -1328,6 +1466,7 @@ pub fn theme_from_json(json: &ThemeJson) -> Theme {
         advanced_search,
         diff,
         diff_file_view,
+        git_screen,
         chars: ThemeChars::default(),
     }
 }

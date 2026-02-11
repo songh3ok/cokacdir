@@ -8,7 +8,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{app::{PanelState, SortBy, SortOrder}, theme::Theme};
-use crate::utils::format::format_size;
+use crate::utils::format::{format_size, truncate_to_display_width, pad_to_display_width};
 
 pub fn draw(frame: &mut Frame, panel: &mut PanelState, area: Rect, is_active: bool, is_bookmarked: bool, diff_selected: bool, theme: &Theme) {
     let inner_width = area.width.saturating_sub(2) as usize;
@@ -306,31 +306,6 @@ fn create_header_line(panel: &PanelState, name_width: usize, type_width: usize, 
     ])
 }
 
-/// Truncate string to fit within display width, accounting for wide characters
-fn truncate_to_width(s: &str, max_width: usize) -> String {
-    let mut result = String::new();
-    let mut current_width = 0;
-
-    for c in s.chars() {
-        let char_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-        if current_width + char_width > max_width {
-            break;
-        }
-        result.push(c);
-        current_width += char_width;
-    }
-    result
-}
-
-/// Pad string to exact display width with spaces
-fn pad_to_width(s: &str, target_width: usize) -> String {
-    let current_width = s.width();
-    if current_width >= target_width {
-        s.to_string()
-    } else {
-        format!("{}{}", s, " ".repeat(target_width - current_width))
-    }
-}
 
 fn create_file_line(
     file: &super::app::FileItem,
@@ -360,7 +335,7 @@ fn create_file_line(
         if name_display_width > effective_name_width {
             let truncate_width = effective_name_width.saturating_sub(3);
             if truncate_width > 0 {
-                let truncated = truncate_to_width(&file.name, truncate_width);
+                let truncated = truncate_to_display_width(&file.name, truncate_width);
                 format!("{}...", truncated)
             } else {
                 "...".to_string()
@@ -372,7 +347,7 @@ fn create_file_line(
 
     // Pad name column to exact width using unicode-aware padding
     let name_with_prefix = format!("{}{}{}", marker, &icon, display_name);
-    let name_col = pad_to_width(&name_with_prefix, name_width);
+    let name_col = pad_to_display_width(&name_with_prefix, name_width);
 
     // Type column: show file extension (max 6 chars, center aligned)
     let type_col_str = if type_width > 0 {
