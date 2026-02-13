@@ -5391,7 +5391,8 @@ impl App {
 
         // If the current panel is remote:
         // - ~ should disconnect and go local home
-        // - / or absolute paths are remote navigation
+        // - ~/subdir should disconnect and go local ~/subdir
+        // - /absolute/path: if exists locally → disconnect and go local, otherwise remote navigation
         // - Relative paths are remote navigation
         if self.active_panel().is_remote() {
             if path_str == "~" {
@@ -5401,8 +5402,20 @@ impl App {
             } else if path_str.starts_with("~/") {
                 // Disconnect and fall through to local goto for ~/subdir
                 self.disconnect_remote_panel();
+            } else if path_str.starts_with('/') {
+                // Absolute path: check if it exists on the local filesystem
+                let local_path = PathBuf::from(path_str);
+                if local_path.exists() {
+                    // Path exists locally → disconnect from remote and navigate locally
+                    self.disconnect_remote_panel();
+                    // fall through to local goto
+                } else {
+                    // Not a local path → navigate within remote
+                    self.execute_goto_remote_relative(path_str);
+                    return;
+                }
             } else {
-                // Navigate within remote (absolute or relative)
+                // Relative path → navigate within remote
                 self.execute_goto_remote_relative(path_str);
                 return;
             }
