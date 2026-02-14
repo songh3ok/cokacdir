@@ -36,7 +36,7 @@ function LanguageToggle() {
 }
 
 function TutorialPageInner() {
-  const { lang, t } = useLanguage()
+  const { t } = useLanguage()
 
   useEffect(() => {
     window.scrollTo(0, 0)
