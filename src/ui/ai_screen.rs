@@ -367,6 +367,8 @@ pub struct AIScreenState {
     pub last_visible_width: usize,
     /// Last known raw lines count before wrap (cached from draw)
     pub last_raw_lines: usize,
+    /// Whether AI screen is in fullscreen mode (toggle with Ctrl+F)
+    pub ai_fullscreen: bool,
 }
 
 /// Maximum number of history items to retain
@@ -539,6 +541,7 @@ impl AIScreenState {
             last_visible_height: 0,
             last_visible_width: 0,
             last_raw_lines: 0,
+            ai_fullscreen: false,
         };
 
         // Add warning message first
@@ -581,6 +584,7 @@ impl AIScreenState {
             last_visible_height: 0,
             last_visible_width: 0,
             last_raw_lines: 0,
+            ai_fullscreen: false,
         };
 
         // Add warning message as first line
@@ -1725,6 +1729,9 @@ pub fn handle_input(state: &mut AIScreenState, code: KeyCode, modifiers: KeyModi
             }
             AIScreenAction::ClearHistory => {
                 state.clear_history();
+            }
+            AIScreenAction::ToggleFullscreen => {
+                state.ai_fullscreen = !state.ai_fullscreen;
             }
         }
     } else if let KeyCode::Char(c) = code {
