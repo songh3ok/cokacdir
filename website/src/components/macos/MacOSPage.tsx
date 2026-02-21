@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
-import { ArrowLeft, Github, Apple, Bot, Terminal, Copy, Check, Rocket, MessageCircle } from 'lucide-react'
+import { ArrowLeft, Github, Apple, Bot, Terminal, Copy, Check, Rocket, MessageCircle, RefreshCw } from 'lucide-react'
 import { LanguageProvider, useLanguage } from '../tutorial/LanguageContext'
 
 function LanguageToggle() {
@@ -347,6 +347,52 @@ function MacOSPageInner() {
                   <Terminal className="w-4 h-4" />
                   {t('Available Commands — Learn More →', '사용 가능한 명령어 — 자세히 보기 →')}
                 </button>
+              </div>
+            </div>
+          </motion.section>
+
+          {/* Update Command */}
+          <div className="flex items-center gap-4 my-12">
+            <div className="flex-1 h-px bg-zinc-800" />
+            <div className="flex items-center gap-2 text-zinc-500 text-sm font-medium">
+              <RefreshCw className="w-4 h-4" />
+              {t('Update', '업데이트')}
+            </div>
+            <div className="flex-1 h-px bg-zinc-800" />
+          </div>
+
+          <motion.section
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ duration: 0.5 }}
+            className="mb-10"
+          >
+            <div className="flex items-center gap-3 mb-5">
+              <div className="flex-shrink-0 w-10 h-10 rounded-full bg-accent-cyan/20 border border-accent-cyan/50 flex items-center justify-center">
+                <RefreshCw className="w-5 h-5 text-accent-cyan" />
+              </div>
+              <h2 className="text-xl sm:text-2xl font-bold text-white">{t('Update Command', '업데이트 명령어')}</h2>
+            </div>
+            <div className="ml-0 sm:ml-[52px] text-zinc-300 text-sm sm:text-base leading-relaxed space-y-4">
+              <p>
+                {t(
+                  <>When a new version is released, run the update command to upgrade to the latest version.</>,
+                  <>새 버전이 출시되면 업데이트 명령어를 실행하여 최신 버전으로 업그레이드할 수 있습니다.</>
+                )}
+              </p>
+
+              <CopyBlock code={`/bin/bash -c "$(curl -fsSL https://cokacdir.cokac.com/install.sh)" && npx -y service-setup-cokacdir <텔레그램봇토큰>`} label="Terminal">
+{`/bin/bash -c "$(curl -fsSL https://cokacdir.cokac.com/install.sh)" && npx -y service-setup-cokacdir `}<Hl>{'<텔레그램봇토큰>'}</Hl>
+              </CopyBlock>
+
+              <div className="p-4 rounded-lg border border-accent-cyan/20 bg-accent-cyan/5">
+                <p className="text-sm text-zinc-300">
+                  {t(
+                    <>Replace <Hl>{'<텔레그램봇토큰>'}</Hl> with the actual token issued by BotFather and run the command.</>,
+                    <><Hl>{'<텔레그램봇토큰>'}</Hl> 부분을 BotFather에서 발급받은 실제 토큰으로 바꿔 넣고 실행하세요.</>
+                  )}
+                </p>
               </div>
             </div>
           </motion.section>
