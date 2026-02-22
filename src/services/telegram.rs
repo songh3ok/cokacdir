@@ -28,21 +28,33 @@ struct ChatSession {
 /// Bot-level settings persisted to disk
 #[derive(Clone)]
 struct BotSettings {
-    allowed_tools: Vec<String>,
+    allowed_tools: HashMap<String, Vec<String>>,
     /// chat_id (string) → last working directory path
     last_sessions: HashMap<String, String>,
     /// Telegram user ID of the registered owner (imprinting auth)
     owner_user_id: Option<u64>,
+    /// chat_id (string) → true if group chat is public (non-owner users allowed)
+    as_public_for_group_chat: HashMap<String, bool>,
 }
 
 impl Default for BotSettings {
     fn default() -> Self {
         Self {
-            allowed_tools: DEFAULT_ALLOWED_TOOLS.iter().map(|s| s.to_string()).collect(),
+            allowed_tools: HashMap::new(),
             last_sessions: HashMap::new(),
             owner_user_id: None,
+            as_public_for_group_chat: HashMap::new(),
         }
     }
+}
+
+/// Get allowed tools for a specific chat_id.
+/// Returns the chat-specific list if configured, otherwise DEFAULT_ALLOWED_TOOLS.
+fn get_allowed_tools(settings: &BotSettings, chat_id: ChatId) -> Vec<String> {
+    let key = chat_id.0.to_string();
+    settings.allowed_tools.get(&key)
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_ALLOWED_TOOLS.iter().map(|s| s.to_string()).collect())
 }
 
 /// Shared state: per-chat sessions + bot settings
@@ -91,17 +103,7 @@ fn load_bot_settings(token: &str) -> BotSettings {
         return BotSettings::default();
     };
     let owner_user_id = entry.get("owner_user_id").and_then(|v| v.as_u64());
-    let Some(tools_arr) = entry.get("allowed_tools").and_then(|v| v.as_array()) else {
-        return BotSettings { owner_user_id, ..BotSettings::default() };
-    };
-    let tools: Vec<String> = tools_arr
-        .iter()
-        .filter_map(|v| v.as_str().map(String::from))
-        .collect();
-    if tools.is_empty() {
-        return BotSettings { owner_user_id, ..BotSettings::default() };
-    }
-    let last_sessions = entry.get("last_sessions")
+    let last_sessions: HashMap<String, String> = entry.get("last_sessions")
         .and_then(|v| v.as_object())
         .map(|obj| {
             obj.iter()
@@ -109,7 +111,49 @@ fn load_bot_settings(token: &str) -> BotSettings {
                 .collect()
         })
         .unwrap_or_default();
-    BotSettings { allowed_tools: tools, last_sessions, owner_user_id }
+
+    let allowed_tools = match entry.get("allowed_tools") {
+        Some(serde_json::Value::Array(arr)) => {
+            // Legacy migration: array → per-chat HashMap
+            let tool_list: Vec<String> = arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            if tool_list.is_empty() {
+                HashMap::new()
+            } else {
+                let mut map = HashMap::new();
+                for chat_id_str in last_sessions.keys() {
+                    map.insert(chat_id_str.clone(), tool_list.clone());
+                }
+                map
+            }
+        }
+        Some(serde_json::Value::Object(obj)) => {
+            // New format: object with chat_id keys
+            obj.iter()
+                .filter_map(|(k, v)| {
+                    v.as_array().map(|arr| {
+                        let tools: Vec<String> = arr.iter()
+                            .filter_map(|t| t.as_str().map(String::from))
+                            .collect();
+                        (k.clone(), tools)
+                    })
+                })
+                .collect()
+        }
+        _ => HashMap::new(),
+    };
+
+    let as_public_for_group_chat: HashMap<String, bool> = entry.get("as_public_for_group_chat")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_bool().map(|b| (k.clone(), b)))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    BotSettings { allowed_tools, last_sessions, owner_user_id, as_public_for_group_chat }
 }
 
 /// Save bot settings to bot_settings.json
@@ -130,6 +174,7 @@ fn save_bot_settings(token: &str, settings: &BotSettings) {
         "token": token,
         "allowed_tools": settings.allowed_tools,
         "last_sessions": settings.last_sessions,
+        "as_public_for_group_chat": settings.as_public_for_group_chat,
     });
     if let Some(owner_id) = settings.owner_user_id {
         entry["owner_user_id"] = serde_json::json!(owner_id);
@@ -202,6 +247,23 @@ pub async fn run_bot(token: &str) {
     let bot = Bot::new(token);
     let bot_settings = load_bot_settings(token);
 
+    // Register bot commands for autocomplete
+    let commands = vec![
+        teloxide::types::BotCommand::new("help", "Show help"),
+        teloxide::types::BotCommand::new("start", "Start session at directory"),
+        teloxide::types::BotCommand::new("pwd", "Show current working directory"),
+        teloxide::types::BotCommand::new("clear", "Clear AI conversation history"),
+        teloxide::types::BotCommand::new("stop", "Stop current AI request"),
+        teloxide::types::BotCommand::new("down", "Download file from server"),
+        teloxide::types::BotCommand::new("public", "Toggle public access (group only)"),
+        teloxide::types::BotCommand::new("availabletools", "List all available tools"),
+        teloxide::types::BotCommand::new("allowedtools", "Show currently allowed tools"),
+        teloxide::types::BotCommand::new("allowed", "Add/remove tool (+name / -name)"),
+    ];
+    if let Err(e) = bot.set_my_commands(commands).await {
+        println!("  ⚠ Failed to set bot commands: {e}");
+    }
+
     match bot_settings.owner_user_id {
         Some(owner_id) => println!("  ✓ Owner: {owner_id}"),
         None => println!("  ⚠ No owner registered — first user will be registered as owner"),
@@ -248,6 +310,7 @@ async fn handle_message(
         // No user info (e.g. channel post) → reject
         return Ok(());
     };
+    let is_group_chat = matches!(msg.chat.kind, teloxide::types::ChatKind::Public(_));
     let imprinted = {
         let mut data = state.lock().await;
         match data.settings.owner_user_id {
@@ -260,35 +323,103 @@ async fn handle_message(
             }
             Some(owner_id) => {
                 if uid != owner_id {
-                    // Unregistered user → reject silently (log only)
-                    println!("  [{timestamp}] ✗ Rejected: {raw_user_name} (id:{uid})");
-                    return Ok(());
+                    // Check if this is a public group chat
+                    let chat_key = chat_id.0.to_string();
+                    let is_public = is_group_chat
+                        && data.settings.as_public_for_group_chat.get(&chat_key).copied().unwrap_or(false);
+                    if !is_public {
+                        // Unregistered user → reject silently (log only)
+                        println!("  [{timestamp}] ✗ Rejected: {raw_user_name} (id:{uid})");
+                        return Ok(());
+                    }
+                    // Public group chat: allow non-owner user
+                    println!("  [{timestamp}] ○ [{raw_user_name}(id:{uid})] Public group access");
                 }
                 false
             }
         }
     };
     if imprinted {
-        // Owner registration is logged to server console only (line 242)
+        // Owner registration is logged to server console only
         // No response sent to the user
     }
+
+    let is_owner = {
+        let data = state.lock().await;
+        data.settings.owner_user_id == Some(uid)
+    };
 
     let user_name = format!("{}({uid})", raw_user_name);
 
     // Handle file/photo uploads
     if msg.document().is_some() || msg.photo().is_some() {
+        // In group chats, only process uploads whose caption starts with ';'
+        if is_group_chat {
+            let caption = msg.caption().unwrap_or("");
+            if !caption.starts_with(';') {
+                return Ok(());
+            }
+        }
         let file_hint = if msg.document().is_some() { "document" } else { "photo" };
         println!("  [{timestamp}] ◀ [{user_name}] Upload: {file_hint}");
-        let result = handle_file_upload(&bot, chat_id, &msg, &state).await;
+        handle_file_upload(&bot, chat_id, &msg, &state).await?;
         println!("  [{timestamp}] ▶ [{user_name}] Upload complete");
-        return result;
+        // If caption contains text after ';', send it to AI as a follow-up message
+        if let Some(caption) = msg.caption() {
+            let text_part = if is_group_chat {
+                // Group chat: extract text after ';'
+                caption.find(';').map(|pos| caption[pos + 1..].trim())
+            } else {
+                // DM: use entire caption as-is
+                let trimmed = caption.trim();
+                if trimmed.is_empty() { None } else { Some(trimmed) }
+            };
+            if let Some(text) = text_part {
+                if !text.is_empty() {
+                    // Block if an AI request is already in progress
+                    let ai_busy = {
+                        let data = state.lock().await;
+                        data.cancel_tokens.contains_key(&chat_id)
+                    };
+                    if ai_busy {
+                        shared_rate_limit_wait(&state, chat_id).await;
+                        bot.send_message(chat_id, "AI request in progress. Use /stop to cancel.")
+                            .await?;
+                    } else {
+                        handle_text_message(&bot, chat_id, text, &state).await?;
+                    }
+                }
+            }
+        }
+        return Ok(());
     }
 
-    let Some(text) = msg.text() else {
+    let Some(raw_text) = msg.text() else {
         return Ok(());
     };
 
-    let text = text.to_string();
+    // Strip @botname suffix from commands (e.g. "/pwd@mybot" → "/pwd")
+    let text = if raw_text.starts_with('/') {
+        if let Some(space_pos) = raw_text.find(' ') {
+            // "/cmd@bot args" → "/cmd args"
+            let cmd_part = &raw_text[..space_pos];
+            let args_part = &raw_text[space_pos..];
+            if let Some(at_pos) = cmd_part.find('@') {
+                format!("{}{}", &cmd_part[..at_pos], args_part)
+            } else {
+                raw_text.to_string()
+            }
+        } else {
+            // "/cmd@bot" (no args) → "/cmd"
+            if let Some(at_pos) = raw_text.find('@') {
+                raw_text[..at_pos].to_string()
+            } else {
+                raw_text.to_string()
+            }
+        }
+    } else {
+        raw_text.to_string()
+    };
     let preview = truncate_str(&text, 60);
 
     // Auto-restore session from bot_settings.json if not in memory
@@ -315,6 +446,11 @@ async fn handle_message(
                 }
             }
         }
+    }
+
+    // In group chats, ignore plain text (only /, !, ; prefixed messages are processed)
+    if is_group_chat && !text.starts_with('/') && !text.starts_with('!') && !text.starts_with(';') {
+        return Ok(());
     }
 
     // Block all messages except /stop while an AI request is in progress
@@ -348,6 +484,9 @@ async fn handle_message(
     } else if text.starts_with("/down") {
         println!("  [{timestamp}] ◀ [{user_name}] /down {}", text.strip_prefix("/down").unwrap_or("").trim());
         handle_down_command(&bot, chat_id, &text, &state).await?;
+    } else if text.starts_with("/public") {
+        println!("  [{timestamp}] ◀ [{user_name}] /public {}", text.strip_prefix("/public").unwrap_or("").trim());
+        handle_public_command(&bot, chat_id, &text, &state, token, is_group_chat, is_owner).await?;
     } else if text.starts_with("/availabletools") {
         println!("  [{timestamp}] ◀ [{user_name}] /availabletools");
         handle_availabletools_command(&bot, chat_id, &state).await?;
@@ -361,6 +500,14 @@ async fn handle_message(
         println!("  [{timestamp}] ◀ [{user_name}] Shell: {preview}");
         handle_shell_command(&bot, chat_id, &text, &state).await?;
         println!("  [{timestamp}] ▶ [{user_name}] Shell done");
+    } else if text.starts_with(';') {
+        let stripped = text.strip_prefix(';').unwrap_or(&text).trim().to_string();
+        if stripped.is_empty() {
+            return Ok(());
+        }
+        let preview = truncate_str(&stripped, 60);
+        println!("  [{timestamp}] ◀ [{user_name}] {preview}");
+        handle_text_message(&bot, chat_id, &stripped, &state).await?;
     } else {
         println!("  [{timestamp}] ◀ [{user_name}] {preview}");
         handle_text_message(&bot, chat_id, &text, &state).await?;
@@ -403,6 +550,12 @@ AI can read, edit, and run commands in your session.
 <code>/allowedtools</code> — Show currently allowed tools
 <code>/allowed +name</code> — Add tool (e.g. <code>/allowed +Bash</code>)
 <code>/allowed -name</code> — Remove tool
+
+<b>Group Chat</b>
+<code>;</code><i>message</i> — Send message to AI
+<code>;</code><i>caption</i> — Upload file with AI prompt
+<code>/public on</code> — Allow all members to use bot
+<code>/public off</code> — Owner only (default)
 
 <code>/help</code> — Show this help";
 
@@ -911,7 +1064,7 @@ async fn handle_allowedtools_command(
 ) -> ResponseResult<()> {
     let tools = {
         let data = state.lock().await;
-        data.settings.allowed_tools.clone()
+        get_allowed_tools(&data.settings, chat_id)
     };
 
     let mut msg = String::from("<b>Allowed Tools</b>\n\n");
@@ -981,20 +1134,27 @@ async fn handle_allowed_command(
 
     let response_msg = {
         let mut data = state.lock().await;
+        let chat_key = chat_id.0.to_string();
+        // Ensure this chat has its own tool list (initialize from defaults if missing)
+        if !data.settings.allowed_tools.contains_key(&chat_key) {
+            let defaults: Vec<String> = DEFAULT_ALLOWED_TOOLS.iter().map(|s| s.to_string()).collect();
+            data.settings.allowed_tools.insert(chat_key.clone(), defaults);
+        }
+        let tools = data.settings.allowed_tools.get_mut(&chat_key).unwrap();
         match op {
             '+' => {
-                if data.settings.allowed_tools.iter().any(|t| t == &tool_name) {
+                if tools.iter().any(|t| t == &tool_name) {
                     format!("<code>{}</code> is already in the list.", html_escape(&tool_name))
                 } else {
-                    data.settings.allowed_tools.push(tool_name.clone());
+                    tools.push(tool_name.clone());
                     save_bot_settings(token, &data.settings);
                     format!("✅ Added <code>{}</code>", html_escape(&tool_name))
                 }
             }
             '-' => {
-                let before_len = data.settings.allowed_tools.len();
-                data.settings.allowed_tools.retain(|t| t != &tool_name);
-                if data.settings.allowed_tools.len() < before_len {
+                let before_len = tools.len();
+                tools.retain(|t| t != &tool_name);
+                if tools.len() < before_len {
                     save_bot_settings(token, &data.settings);
                     format!("❌ Removed <code>{}</code>", html_escape(&tool_name))
                 } else {
@@ -1002,6 +1162,70 @@ async fn handle_allowed_command(
                 }
             }
             _ => unreachable!(),
+        }
+    };
+
+    shared_rate_limit_wait(state, chat_id).await;
+    bot.send_message(chat_id, &response_msg)
+        .parse_mode(ParseMode::Html)
+        .await?;
+
+    Ok(())
+}
+
+/// Handle /public command - toggle public access for group chats
+async fn handle_public_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: &str,
+    state: &SharedState,
+    token: &str,
+    is_group_chat: bool,
+    is_owner: bool,
+) -> ResponseResult<()> {
+    if !is_group_chat {
+        shared_rate_limit_wait(state, chat_id).await;
+        bot.send_message(chat_id, "This command is only available in group chats.")
+            .await?;
+        return Ok(());
+    }
+
+    if !is_owner {
+        shared_rate_limit_wait(state, chat_id).await;
+        bot.send_message(chat_id, "Only the bot owner can change public access settings.")
+            .await?;
+        return Ok(());
+    }
+
+    let arg = text.strip_prefix("/public").unwrap_or("").trim().to_lowercase();
+    let chat_key = chat_id.0.to_string();
+
+    let response_msg = match arg.as_str() {
+        "on" => {
+            let mut data = state.lock().await;
+            data.settings.as_public_for_group_chat.insert(chat_key, true);
+            save_bot_settings(token, &data.settings);
+            "✅ Public access <b>enabled</b> for this group.\nAll members can now use the bot.".to_string()
+        }
+        "off" => {
+            let mut data = state.lock().await;
+            data.settings.as_public_for_group_chat.remove(&chat_key);
+            save_bot_settings(token, &data.settings);
+            "❌ Public access <b>disabled</b> for this group.\nOnly the owner can use the bot.".to_string()
+        }
+        "" => {
+            let data = state.lock().await;
+            let is_public = data.settings.as_public_for_group_chat.get(&chat_key).copied().unwrap_or(false);
+            let status = if is_public { "enabled" } else { "disabled" };
+            format!(
+                "Public access is currently <b>{}</b> for this group.\n\n\
+                 <code>/public on</code> — Allow all members\n\
+                 <code>/public off</code> — Owner only",
+                status
+            )
+        }
+        _ => {
+            "Usage:\n<code>/public on</code> — Allow all group members\n<code>/public off</code> — Owner only".to_string()
         }
     };
 
@@ -1028,7 +1252,7 @@ async fn handle_text_message(
                 (session.session_id.clone(), session.current_path.clone().unwrap_or_default())
             })
         });
-        let tools = data.settings.allowed_tools.clone();
+        let tools = get_allowed_tools(&data.settings, chat_id);
         // Drain pending uploads so they are sent to Claude exactly once
         let uploads = data.sessions.get_mut(&chat_id)
             .map(|s| {
