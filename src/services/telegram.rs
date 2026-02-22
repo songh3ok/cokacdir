@@ -1338,19 +1338,7 @@ async fn handle_text_message(
          The user cannot see your tool calls, so narrate your progress so they know what is happening.\n\n\
          IMPORTANT: The user is on Telegram and CANNOT interact with any interactive prompts, dialogs, or confirmation requests. \
          All tools that require user interaction (such as AskUserQuestion, EnterPlanMode, ExitPlanMode) will NOT work. \
-         Never use tools that expect user interaction. If you need clarification, just ask in plain text.\n\n\
-         MCP TOOLS WORKFLOW:\n\
-         Step 1: Check if required MCP tools are registered:\n\
-           cokacdir --ismcptool \"mcp__SERVER1__TOOL1\" \"mcp__SERVER2__TOOL2\" ...\n\
-           Output: \"toolname: registered\" or \"toolname: not registered\" for each tool.\n\
-         Step 2: If ALL tools show \"registered\", proceed to use them directly.\n\
-         Step 3: If ANY tool shows \"not registered\", register ALL missing tools in a single command:\n\
-           cokacdir --addmcptool \"mcp__SERVER1__TOOL1\" \"mcp__SERVER2__TOOL2\" ...\n\
-           Then DO NOT call any MCP tool in this turn. Instead, reply to the user that the tools were not registered \
-         and have now been added. The user will send a follow-up message, and you can use the MCP tools in the next turn.\n\
-         CRITICAL RULES:\n\
-         1. NEVER run multiple --addmcptool commands in parallel to avoid race conditions.\n\
-         2. NEVER call MCP tools in the same turn as --addmcptool. The permission is not applied until the next turn.{}",
+         Never use tools that expect user interaction. If you need clarification, just ask in plain text.{}",
         current_path, chat_id.0, token_hash(bot.token()), disabled_notice
     );
 

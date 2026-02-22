@@ -142,9 +142,8 @@ pub fn execute_command(
     };
     let mut args = vec![
         "-p".to_string(),
+        "--dangerously-skip-permissions".to_string(),
         "--tools".to_string(),
-        tools_str.clone(),
-        "--allowedTools".to_string(),
         tools_str,
         "--output-format".to_string(),
         "json".to_string(),
@@ -374,9 +373,8 @@ IMPORTANT: Format your responses using Markdown for better readability:
     };
     let mut args = vec![
         "-p".to_string(),
+        "--dangerously-skip-permissions".to_string(),
         "--tools".to_string(),
-        tools_str.clone(),
-        "--allowedTools".to_string(),
         tools_str,
         "--verbose".to_string(),
         "--output-format".to_string(),
