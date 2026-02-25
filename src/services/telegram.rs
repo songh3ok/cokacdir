@@ -50,6 +50,7 @@ macro_rules! tg {
 }
 
 /// Per-chat session state
+#[derive(Clone)]
 struct ChatSession {
     session_id: Option<String>,
     current_path: Option<String>,
@@ -71,6 +72,10 @@ struct BotSettings {
     owner_user_id: Option<u64>,
     /// chat_id (string) → true if group chat is public (non-owner users allowed)
     as_public_for_group_chat: HashMap<String, bool>,
+    /// chat_id (string) → model name (e.g. "sonnet", "opus", "haiku")
+    models: HashMap<String, String>,
+    /// Debug logging toggle
+    debug: bool,
 }
 
 impl Default for BotSettings {
@@ -80,6 +85,8 @@ impl Default for BotSettings {
             last_sessions: HashMap::new(),
             owner_user_id: None,
             as_public_for_group_chat: HashMap::new(),
+            models: HashMap::new(),
+            debug: false,
         }
     }
 }
@@ -91,6 +98,376 @@ fn get_allowed_tools(settings: &BotSettings, chat_id: ChatId) -> Vec<String> {
     settings.allowed_tools.get(&key)
         .cloned()
         .unwrap_or_else(|| DEFAULT_ALLOWED_TOOLS.iter().map(|s| s.to_string()).collect())
+}
+
+/// Get the configured model for a specific chat_id, if any.
+fn get_model(settings: &BotSettings, chat_id: ChatId) -> Option<String> {
+    let key = chat_id.0.to_string();
+    settings.models.get(&key).cloned()
+}
+
+/// Schedule entry persisted as JSON in ~/.cokacdir/schedule/
+#[derive(Clone)]
+struct ScheduleEntry {
+    id: String,
+    chat_id: i64,
+    bot_key: String,
+    current_path: String,
+    prompt: String,
+    schedule: String,         // original --at value (cron expression or absolute time)
+    schedule_type: String,    // "absolute" | "cron"
+    once: bool,
+    last_run: Option<String>, // "2026-02-23 14:00:00"
+    created_at: String,
+    context_summary: Option<String>, // context summary text for session-isolated schedule
+}
+
+/// Directory for schedule files: ~/.cokacdir/schedule/
+fn schedule_dir() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".cokacdir").join("schedule"))
+}
+
+
+
+/// Read a single schedule entry from a JSON file
+fn read_schedule_entry(path: &std::path::Path) -> Option<ScheduleEntry> {
+    let content = fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+    Some(ScheduleEntry {
+        id: v.get("id")?.as_str()?.to_string(),
+        chat_id: v.get("chat_id")?.as_i64()?,
+        bot_key: v.get("bot_key")?.as_str()?.to_string(),
+        current_path: v.get("current_path")?.as_str()?.to_string(),
+        prompt: v.get("prompt")?.as_str()?.to_string(),
+        schedule: v.get("schedule")?.as_str()?.to_string(),
+        schedule_type: v.get("schedule_type")?.as_str()?.to_string(),
+        once: v.get("once").and_then(|v| v.as_bool()).unwrap_or(false),
+        last_run: v.get("last_run").and_then(|v| v.as_str()).map(String::from),
+        created_at: v.get("created_at")?.as_str()?.to_string(),
+        context_summary: v.get("context_summary").and_then(|v| v.as_str()).map(String::from),
+    })
+}
+
+/// Write a schedule entry to its JSON file
+fn write_schedule_entry(entry: &ScheduleEntry) -> Result<(), String> {
+    let dir = schedule_dir().ok_or("Cannot determine home directory")?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create schedule dir: {e}"))?;
+    let json = serde_json::json!({
+        "id": entry.id,
+        "chat_id": entry.chat_id,
+        "bot_key": entry.bot_key,
+        "current_path": entry.current_path,
+        "prompt": entry.prompt,
+        "schedule": entry.schedule,
+        "schedule_type": entry.schedule_type,
+        "once": entry.once,
+        "last_run": entry.last_run,
+        "created_at": entry.created_at,
+        "context_summary": entry.context_summary,
+    });
+    let path = dir.join(format!("{}.json", entry.id));
+    let tmp_path = dir.join(format!("{}.json.tmp", entry.id));
+    fs::write(&tmp_path, serde_json::to_string_pretty(&json).unwrap_or_default())
+        .map_err(|e| format!("Failed to write schedule file: {e}"))?;
+    fs::rename(&tmp_path, &path)
+        .map_err(|e| format!("Failed to finalize schedule file: {e}"))
+}
+
+/// List all schedule entries matching the given bot_key and optionally chat_id
+fn list_schedule_entries(bot_key: &str, chat_id: Option<i64>) -> Vec<ScheduleEntry> {
+    let Some(dir) = schedule_dir() else { return Vec::new() };
+    let Ok(entries) = fs::read_dir(&dir) else { return Vec::new() };
+    let mut result: Vec<ScheduleEntry> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map(|ext| ext == "json").unwrap_or(false))
+        .filter_map(|e| read_schedule_entry(&e.path()))
+        .filter(|e| e.bot_key == bot_key)
+        .filter(|e| chat_id.map_or(true, |cid| e.chat_id == cid))
+        .collect();
+    result.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    result
+}
+
+/// Delete a schedule entry by ID
+fn delete_schedule_entry(id: &str) -> bool {
+    let Some(dir) = schedule_dir() else { return false };
+    let path = dir.join(format!("{id}.json"));
+    fs::remove_file(&path).is_ok()
+}
+
+/// Parse a relative time string (e.g. "4h", "30m", "1d") into a future DateTime
+fn parse_relative_time(s: &str) -> Option<chrono::DateTime<chrono::Local>> {
+    let s = s.trim();
+    if s.len() < 2 { return None; }
+    let (num_part, unit) = s.split_at(s.len() - 1);
+    let num: i64 = num_part.parse().ok()?;
+    if num <= 0 { return None; }
+    let seconds = match unit {
+        "m" => num * 60,
+        "h" => num * 3600,
+        "d" => num * 86400,
+        _ => return None,
+    };
+    Some(chrono::Local::now() + chrono::Duration::seconds(seconds))
+}
+
+/// Check if a cron expression matches the given datetime.
+/// 5 fields: minute, hour, day-of-month, month, day-of-week (0=Sun)
+fn cron_matches(expr: &str, dt: chrono::DateTime<chrono::Local>) -> bool {
+    use chrono::Datelike;
+    use chrono::Timelike;
+
+    let fields: Vec<&str> = expr.split_whitespace().collect();
+    if fields.len() != 5 { return false; }
+
+    let values = [
+        dt.minute(),
+        dt.hour(),
+        dt.day(),
+        dt.month(),
+        dt.weekday().num_days_from_sunday(),
+    ];
+
+    // Range start for each field: minute(0), hour(0), day-of-month(1), month(1), day-of-week(0)
+    let range_starts = [0u32, 0, 1, 1, 0];
+
+    for ((field, &val), &range_start) in fields.iter().zip(values.iter()).zip(range_starts.iter()) {
+        if !cron_field_matches(field, val, range_start) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Check if a single cron field matches a value.
+/// Supports: *, single number, comma-separated list, ranges (a-b), step (*/n, a-b/n)
+/// range_start: the minimum value for this field (0 for minute/hour/dow, 1 for day/month)
+fn cron_field_matches(field: &str, val: u32, range_start: u32) -> bool {
+    if field == "*" { return true; }
+
+    for part in field.split(',') {
+        let part = part.trim();
+        // Handle step: */n or a-b/n
+        if let Some((range_part, step_str)) = part.split_once('/') {
+            if let Ok(step) = step_str.parse::<u32>() {
+                if step == 0 { continue; }
+                if range_part == "*" {
+                    if (val - range_start) % step == 0 { return true; }
+                } else if let Some((start_str, end_str)) = range_part.split_once('-') {
+                    if let (Ok(start), Ok(end)) = (start_str.parse::<u32>(), end_str.parse::<u32>()) {
+                        if val >= start && val <= end && (val - start) % step == 0 { return true; }
+                    }
+                }
+            }
+        } else if let Some((start_str, end_str)) = part.split_once('-') {
+            // Range: a-b
+            if let (Ok(start), Ok(end)) = (start_str.parse::<u32>(), end_str.parse::<u32>()) {
+                if val >= start && val <= end { return true; }
+            }
+        } else {
+            // Single number
+            if let Ok(n) = part.parse::<u32>() {
+                if val == n { return true; }
+            }
+        }
+    }
+    false
+}
+
+// === Public API for CLI commands (main.rs) ===
+
+/// Public data struct mirroring ScheduleEntry for cross-module use
+#[derive(Clone)]
+pub struct ScheduleEntryData {
+    pub id: String,
+    pub chat_id: i64,
+    pub bot_key: String,
+    pub current_path: String,
+    pub prompt: String,
+    pub schedule: String,
+    pub schedule_type: String,
+    pub once: bool,
+    pub last_run: Option<String>,
+    pub created_at: String,
+    pub context_summary: Option<String>,
+}
+
+impl From<&ScheduleEntry> for ScheduleEntryData {
+    fn from(e: &ScheduleEntry) -> Self {
+        Self {
+            id: e.id.clone(),
+            chat_id: e.chat_id,
+            bot_key: e.bot_key.clone(),
+            current_path: e.current_path.clone(),
+            prompt: e.prompt.clone(),
+            schedule: e.schedule.clone(),
+            schedule_type: e.schedule_type.clone(),
+            once: e.once,
+            last_run: e.last_run.clone(),
+            created_at: e.created_at.clone(),
+            context_summary: e.context_summary.clone(),
+        }
+    }
+}
+
+impl From<&ScheduleEntryData> for ScheduleEntry {
+    fn from(d: &ScheduleEntryData) -> Self {
+        Self {
+            id: d.id.clone(),
+            chat_id: d.chat_id,
+            bot_key: d.bot_key.clone(),
+            current_path: d.current_path.clone(),
+            prompt: d.prompt.clone(),
+            schedule: d.schedule.clone(),
+            schedule_type: d.schedule_type.clone(),
+            once: d.once,
+            last_run: d.last_run.clone(),
+            created_at: d.created_at.clone(),
+            context_summary: d.context_summary.clone(),
+        }
+    }
+}
+
+pub fn parse_relative_time_pub(s: &str) -> Option<chrono::DateTime<chrono::Local>> {
+    parse_relative_time(s)
+}
+
+pub fn write_schedule_entry_pub(data: &ScheduleEntryData) -> Result<(), String> {
+    let entry = ScheduleEntry::from(data);
+    write_schedule_entry(&entry)
+}
+
+pub fn list_schedule_entries_pub(bot_key: &str, chat_id: Option<i64>) -> Vec<ScheduleEntryData> {
+    list_schedule_entries(bot_key, chat_id).iter().map(ScheduleEntryData::from).collect()
+}
+
+pub fn list_all_schedule_ids_pub() -> std::collections::HashSet<String> {
+    let Some(dir) = schedule_dir() else { return std::collections::HashSet::new() };
+    let Ok(entries) = fs::read_dir(&dir) else { return std::collections::HashSet::new() };
+    entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let path = e.path();
+            if path.extension().map(|ext| ext == "json").unwrap_or(false) {
+                path.file_stem().map(|s| s.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+pub fn delete_schedule_entry_pub(id: &str) -> bool {
+    delete_schedule_entry(id)
+}
+
+/// Resolve the current working path for a chat from bot_settings.json
+pub fn resolve_current_path_for_chat(chat_id: i64, hash_key: &str) -> Option<String> {
+    let path = bot_settings_path()?;
+    let content = fs::read_to_string(&path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let entry = json.get(hash_key)?;
+    let last_sessions = entry.get("last_sessions")?.as_object()?;
+    let chat_key = chat_id.to_string();
+    last_sessions.get(&chat_key)?.as_str().map(String::from)
+}
+
+/// Build the system prompt for Telegram AI sessions
+fn build_system_prompt(role: &str, current_path: &str, chat_id: i64, bot_key: &str, disabled_notice: &str, session_id: Option<&str>) -> String {
+    let session_notice = match session_id {
+        Some(sid) => format!(
+            "\n\n\
+             Current session ID: {sid}\n\
+             When scheduling a task that CONTINUES or EXTENDS the current conversation \
+             (e.g. \"finish this later\", \"do the rest tomorrow\", \"remind me to continue this\"), \
+             add --session {sid} to the --cron command so the scheduled task inherits this conversation context.\n\
+             Do NOT use --session for independent tasks that don't need the current conversation history \
+             (e.g. \"check server status every hour\", \"send a daily report\")."
+        ),
+        None => String::new(),
+    };
+    format!(
+        "{role}\n\
+         Current working directory: {current_path}\n\n\
+         Always keep the user informed about what you are doing. \
+         Briefly explain each step as you work (e.g. \"Reading the file...\", \"Creating the script...\", \"Running tests...\"). \
+         The user cannot see your tool calls, so narrate your progress so they know what is happening.\n\n\
+         IMPORTANT: The user is on Telegram and CANNOT interact with any interactive prompts, dialogs, or confirmation requests. \
+         All tools that require user interaction (such as AskUserQuestion, EnterPlanMode, ExitPlanMode) will NOT work. \
+         Never use tools that expect user interaction. If you need clarification, just ask in plain text.\n\n\
+         Response format: Use Markdown by default, but do NOT use Markdown tables.\n\n\
+         ═══════════════════════════════════════\n\
+         COKACDIR COMMAND REFERENCE\n\
+         ═══════════════════════════════════════\n\
+         All commands output JSON. Success: {{\"status\":\"ok\",...}}, Error: {{\"status\":\"error\",\"message\":\"...\"}}\n\n\
+         ── FILE DELIVERY ──\n\
+         Send a file to the user's Telegram chat:\n\
+         cokacdir --sendfile <FILEPATH> --chat {chat_id} --key {bot_key}\n\
+         • Use this whenever your work produces a file (code, reports, images, archives, etc.)\n\
+         • Do NOT tell the user to use /down — always use this command instead\n\
+         • Output: {{\"status\":\"ok\",\"path\":\"<absolute_path>\"}}\n\n\
+         ── SERVER TIME ──\n\
+         Get current server time (use before scheduling to confirm timezone):\n\
+         cokacdir --currenttime\n\
+         • Output: {{\"status\":\"ok\",\"time\":\"2026-02-25 14:30:00\"}}\n\n\
+         ── SCHEDULE: REGISTER ──\n\
+         cokacdir --cron \"<PROMPT>\" --at \"<TIME>\" --chat {chat_id} --key {bot_key} [--once] [--session <SESSION_ID>]\n\
+         • --at formats:\n\
+           - \"2026-02-25 18:00:00\" or \"30m\", \"4h\", \"1d\" → one-time (auto-deleted after execution)\n\
+           - \"0 * * * *\" (5-field cron) → recurring\n\
+         • --once: cron only — run once at the next match then auto-delete\n\
+         • --session <SID>: pass ONLY when the task continues the current conversation context\n\
+         • PROMPT rules:\n\
+           1. Write as an imperative INSTRUCTION for another AI, not conversational text\n\
+           2. ★ MUST be in the user's language (한국어 사용자 → 한국어, English user → English)\n\
+         • Output: {{\"status\":\"ok\",\"id\":\"...\",\"prompt\":\"...\",\"schedule\":\"...\"}}{session_notice}\n\n\
+         ── SCHEDULE: LIST ──\n\
+         cokacdir --cron-list --chat {chat_id} --key {bot_key}\n\
+         • Output: {{\"status\":\"ok\",\"schedules\":[{{\"id\":\"...\",\"prompt\":\"...\",\"schedule\":\"...\",\"created_at\":\"...\"}},...]}}\n\n\
+         ── SCHEDULE: REMOVE ──\n\
+         cokacdir --cron-remove <SCHEDULE_ID> --chat {chat_id} --key {bot_key}\n\
+         • Output: {{\"status\":\"ok\",\"id\":\"...\"}}\n\n\
+         ── SCHEDULE: UPDATE TIME ──\n\
+         cokacdir --cron-update <SCHEDULE_ID> --at \"<NEW_TIME>\" --chat {chat_id} --key {bot_key}\n\
+         • --at accepts the same formats as --cron\n\
+         • Output: {{\"status\":\"ok\",\"id\":\"...\",\"schedule\":\"...\"}}\n\n\
+         ═══════════════════════════════════════{disabled_notice}",
+        role = role,
+        current_path = current_path,
+        chat_id = chat_id,
+        bot_key = bot_key,
+        disabled_notice = disabled_notice,
+        session_notice = session_notice,
+    )
+}
+
+/// Check if a newer version is available by fetching Cargo.toml from GitHub.
+/// Returns a notice string if an update is available, None otherwise.
+async fn check_latest_version(current: &str) -> Option<String> {
+    let url = "https://raw.githubusercontent.com/kstost/cokacdir/refs/heads/main/Cargo.toml";
+    let resp = reqwest::Client::new()
+        .get(url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send().await.ok()?;
+    let text = resp.text().await.ok()?;
+    let latest = text.lines()
+        .find(|l| l.starts_with("version"))?
+        .split('"').nth(1)?;
+    if version_is_newer(latest, current) {
+        Some(format!("🆕 v{} available — https://cokacdir.cokac.com/", latest))
+    } else {
+        None
+    }
+}
+
+/// Compare two semver-like version strings. Returns true if `a` is strictly greater than `b`.
+fn version_is_newer(a: &str, b: &str) -> bool {
+    let parse = |s: &str| -> Vec<u64> {
+        s.split('.').filter_map(|p| p.parse().ok()).collect()
+    };
+    let va = parse(a);
+    let vb = parse(b);
+    va > vb
 }
 
 /// Shared state: per-chat sessions + bot settings
@@ -105,6 +482,8 @@ struct SharedData {
     api_timestamps: HashMap<ChatId, tokio::time::Instant>,
     /// Telegram API polling interval in milliseconds (shared across all bots)
     polling_time_ms: u64,
+    /// Schedule IDs currently being executed or pending, per chat
+    pending_schedules: HashMap<ChatId, std::collections::HashSet<String>>,
 }
 
 type SharedState = Arc<Mutex<SharedData>>;
@@ -191,7 +570,18 @@ fn load_bot_settings(token: &str) -> BotSettings {
         })
         .unwrap_or_default();
 
-    BotSettings { allowed_tools, last_sessions, owner_user_id, as_public_for_group_chat }
+    let models: HashMap<String, String> = entry.get("models")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let debug = entry.get("debug").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    BotSettings { allowed_tools, last_sessions, owner_user_id, as_public_for_group_chat, models, debug }
 }
 
 /// Save bot settings to bot_settings.json
@@ -213,13 +603,18 @@ fn save_bot_settings(token: &str, settings: &BotSettings) {
         "allowed_tools": settings.allowed_tools,
         "last_sessions": settings.last_sessions,
         "as_public_for_group_chat": settings.as_public_for_group_chat,
+        "models": settings.models,
+        "debug": settings.debug,
     });
     if let Some(owner_id) = settings.owner_user_id {
         entry["owner_user_id"] = serde_json::json!(owner_id);
     }
     json[key] = entry;
     if let Ok(s) = serde_json::to_string_pretty(&json) {
-        let _ = fs::write(&path, s);
+        let tmp_path = path.with_extension("json.tmp");
+        if fs::write(&tmp_path, &s).is_ok() {
+            let _ = fs::rename(&tmp_path, &path);
+        }
     }
 }
 
@@ -285,6 +680,12 @@ pub async fn run_bot(token: &str) {
     let bot = Bot::new(token);
     let bot_settings = load_bot_settings(token);
 
+    // Restore debug flag from saved settings
+    if bot_settings.debug {
+        TG_DEBUG.store(true, Ordering::Relaxed);
+        crate::services::claude::DEBUG_ENABLED.store(true, Ordering::Relaxed);
+    }
+
     // Register bot commands for autocomplete
     let commands = vec![
         teloxide::types::BotCommand::new("help", "Show help"),
@@ -298,7 +699,8 @@ pub async fn run_bot(token: &str) {
         teloxide::types::BotCommand::new("allowedtools", "Show currently allowed tools"),
         teloxide::types::BotCommand::new("allowed", "Add/remove tool (+name / -name)"),
         teloxide::types::BotCommand::new("setpollingtime", "Set API polling interval (ms)"),
-        teloxide::types::BotCommand::new("debug", "Toggle API debug logging"),
+        teloxide::types::BotCommand::new("model", "Set AI model"),
+        teloxide::types::BotCommand::new("debug", "Toggle debug logging"),
     ];
     if let Err(e) = tg!("set_my_commands", bot.set_my_commands(commands).await) {
         println!("  ⚠ Failed to set bot commands: {e}");
@@ -319,9 +721,41 @@ pub async fn run_bot(token: &str) {
         stop_message_ids: HashMap::new(),
         api_timestamps: HashMap::new(),
         polling_time_ms,
+        pending_schedules: HashMap::new(),
     }));
 
     println!("  ✓ Bot connected — Listening for messages");
+    println!("  ✓ Scheduler started (5s interval)");
+
+    // Send startup greeting to known chats
+    {
+        let data = state.lock().await;
+        let chat_ids: Vec<i64> = data.settings.last_sessions.keys()
+            .filter_map(|k| k.parse::<i64>().ok())
+            .collect();
+        let version = env!("CARGO_PKG_VERSION");
+        let update_notice = check_latest_version(version).await;
+        for cid in chat_ids {
+            let chat_id = ChatId(cid);
+            let last_path = data.settings.last_sessions.get(&cid.to_string())
+                .map(|p| p.as_str())
+                .unwrap_or("(unknown)");
+            let mut msg = format!("🟢 cokacdir started (v{})\n📂 Resuming session at {}", version, last_path);
+            if let Some(ref notice) = update_notice {
+                msg.push('\n');
+                msg.push_str(notice);
+            }
+            let _ = tg!("send_message", bot.send_message(chat_id, msg).await);
+        }
+    }
+
+    // Schedule workspace directories are preserved for user access via /start
+
+    // Spawn scheduler loop
+    let scheduler_bot = bot.clone();
+    let scheduler_state = state.clone();
+    let scheduler_token = token.to_string();
+    let scheduler_handle = tokio::spawn(scheduler_loop(scheduler_bot, scheduler_state, scheduler_token));
 
     let shared_state = state.clone();
     let token_owned = token.to_string();
@@ -333,6 +767,8 @@ pub async fn run_bot(token: &str) {
         }
     })
     .await;
+
+    scheduler_handle.abort();
 }
 
 /// Route incoming messages to appropriate handlers
@@ -464,7 +900,7 @@ async fn handle_message(
     } else {
         raw_text.to_string()
     };
-    let preview = truncate_str(&text, 60);
+    let preview = &text;
 
     // Auto-restore session from bot_settings.json if not in memory
     if !text.starts_with("/start") {
@@ -540,12 +976,19 @@ async fn handle_message(
     } else if text.starts_with("/setpollingtime") {
         println!("  [{timestamp}] ◀ [{user_name}] /setpollingtime {}", text.strip_prefix("/setpollingtime").unwrap_or("").trim());
         handle_setpollingtime_command(&bot, chat_id, &text, &state).await?;
+    } else if text.starts_with("/model") {
+        println!("  [{timestamp}] ◀ [{user_name}] /model {}", text.strip_prefix("/model").unwrap_or("").trim());
+        handle_model_command(&bot, chat_id, &text, &state, token).await?;
     } else if text.starts_with("/debug") {
         println!("  [{timestamp}] ◀ [{user_name}] /debug");
-        handle_debug_command(&bot, chat_id, &state).await?;
+        handle_debug_command(&bot, chat_id, &state, token).await?;
     } else if text.starts_with("/allowed") {
         println!("  [{timestamp}] ◀ [{user_name}] /allowed {}", text.strip_prefix("/allowed").unwrap_or("").trim());
         handle_allowed_command(&bot, chat_id, &text, &state, token).await?;
+    } else if text.starts_with('/') && is_workspace_id(text[1..].split_whitespace().next().unwrap_or("")) {
+        let workspace_id = text[1..].split_whitespace().next().unwrap();
+        println!("  [{timestamp}] ◀ [{user_name}] /{workspace_id}");
+        handle_workspace_resume(&bot, chat_id, workspace_id, &state, token).await?;
     } else if text.starts_with('!') {
         println!("  [{timestamp}] ◀ [{user_name}] Shell: {preview}");
         handle_shell_command(&bot, chat_id, &text, &state).await?;
@@ -554,7 +997,7 @@ async fn handle_message(
         if stripped.is_empty() {
             return Ok(());
         }
-        let preview = truncate_str(&stripped, 60);
+        let preview = &stripped;
         println!("  [{timestamp}] ◀ [{user_name}] {preview}");
         handle_text_message(&bot, chat_id, &stripped, &state).await?;
     } else {
@@ -607,11 +1050,16 @@ AI can read, edit, and run commands in your session.
 <code>/public on</code> — Allow all members to use bot
 <code>/public off</code> — Owner only (default)
 
+<b>Schedule</b>
+Ask in natural language to manage schedules.
+
 <b>Settings</b>
+<code>/model</code> — Show current AI model
+<code>/model &lt;name&gt;</code> — Set model (sonnet/opus/haiku/sonnet[1m]/opus[1m]/haiku[1m])
 <code>/setpollingtime &lt;ms&gt;</code> — Set API polling interval
   Too low may cause Telegram API rate limits.
   Minimum 2500ms, recommended 3000ms+.
-<code>/debug</code> — Toggle API debug logging
+<code>/debug</code> — Toggle debug logging
 
 <code>/help</code> — Show this help";
 
@@ -704,24 +1152,17 @@ async fn handle_start_command(
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!("  [{ts}] ▶ Session restored: {canonical_path}");
             response_lines.push(format!("Session restored at `{}`.", canonical_path));
-            response_lines.push(String::new());
-
-            // Show last 5 conversation items
-            let history_len = session_data.history.len();
-            let start_idx = if history_len > 5 { history_len - 5 } else { 0 };
-            for item in &session_data.history[start_idx..] {
-                let prefix = match item.item_type {
-                    HistoryType::User => "You",
-                    HistoryType::Assistant => "AI",
-                    HistoryType::Error => "Error",
-                    HistoryType::System => "System",
-                    HistoryType::ToolUse => "Tool",
-                    HistoryType::ToolResult => "Result",
-                };
-                // Truncate long items for display
-                let content: String = item.content.chars().take(200).collect();
-                let truncated = if item.content.chars().count() > 200 { "..." } else { "" };
-                response_lines.push(format!("[{}] {}{}", prefix, content, truncated));
+            if let Some(folder_name) = std::path::Path::new(&canonical_path).file_name().and_then(|n| n.to_str()) {
+                if is_workspace_id(folder_name) {
+                    response_lines.push(format!("Use /{} to resume this session.", folder_name));
+                }
+            }
+            let header_len: usize = response_lines.iter().map(|l| l.len() + 1).sum();
+            let remaining = TELEGRAM_MSG_LIMIT.saturating_sub(header_len + 2);
+            let preview = build_history_preview(&session_data.history, remaining);
+            if !preview.is_empty() {
+                response_lines.push(String::new());
+                response_lines.push(preview);
             }
         } else {
             session.session_id = None;
@@ -730,6 +1171,139 @@ async fn handle_start_command(
 
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!("  [{ts}] ▶ Session started: {canonical_path}");
+            response_lines.push(format!("Session started at `{}`.", canonical_path));
+            // Show workspace ID shortcut if this is a workspace directory
+            if let Some(folder_name) = std::path::Path::new(&canonical_path).file_name().and_then(|n| n.to_str()) {
+                if is_workspace_id(folder_name) {
+                    response_lines.push(format!("Use /{} to resume this session.", folder_name));
+                }
+            }
+        }
+    }
+
+    // Persist chat_id → path mapping for auto-restore after restart
+    {
+        let mut data = state.lock().await;
+        data.settings.last_sessions.insert(chat_id.0.to_string(), canonical_path);
+        save_bot_settings(token, &data.settings);
+    }
+
+    let response_text = response_lines.join("\n");
+    let html = markdown_to_telegram_html(&response_text);
+    send_long_message(bot, chat_id, &html, Some(ParseMode::Html), state).await?;
+
+    Ok(())
+}
+
+/// Build a history preview code block that fits within the given byte budget.
+/// Items are shown oldest-first (most recent at bottom), filling from the bottom up.
+fn build_history_preview(history: &[HistoryItem], budget: usize) -> String {
+    if history.is_empty() {
+        return String::new();
+    }
+    let code_block_overhead = "```\n".len() + "\n```".len(); // 8 bytes
+    if budget <= code_block_overhead + 10 {
+        return String::new();
+    }
+    let content_budget = budget - code_block_overhead;
+
+    // Build lines from newest to oldest, stop when budget exhausted
+    let mut collected: Vec<String> = Vec::new();
+    let mut used = 0;
+    for item in history.iter().rev() {
+        let prefix = match item.item_type {
+            HistoryType::User => "👤",
+            HistoryType::Assistant => "🤖",
+            HistoryType::Error => "❌",
+            HistoryType::System => "⚙️",
+            HistoryType::ToolUse => "🔧",
+            HistoryType::ToolResult => "📋",
+        };
+        let line = format!("{} {}", prefix, item.content);
+        let line_len = line.len() + 1; // +1 for newline
+        if used + line_len > content_budget {
+            break;
+        }
+        collected.push(line);
+        used += line_len;
+    }
+    if collected.is_empty() {
+        return String::new();
+    }
+    collected.reverse();
+    format!("```\n{}\n```", collected.join("\n"))
+}
+
+/// Check if a string is a valid 8-character workspace ID (e.g. "B4E9451D" or "k3m9x2ab")
+fn is_workspace_id(s: &str) -> bool {
+    s.len() == 8 && s.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// Handle /WORKSPACE_ID command - resume a workspace session by its ID
+async fn handle_workspace_resume(
+    bot: &Bot,
+    chat_id: ChatId,
+    workspace_id: &str,
+    state: &SharedState,
+    token: &str,
+) -> ResponseResult<()> {
+    let Some(home) = dirs::home_dir() else {
+        shared_rate_limit_wait(state, chat_id).await;
+        tg!("send_message", bot.send_message(chat_id, "Error: cannot determine home directory.")
+            .await)?;
+        return Ok(());
+    };
+
+    let workspace_path = home.join(".cokacdir").join("workspace").join(workspace_id);
+    if !workspace_path.exists() || !workspace_path.is_dir() {
+        shared_rate_limit_wait(state, chat_id).await;
+        tg!("send_message", bot.send_message(chat_id, format!("Error: no workspace found for '{}'.", workspace_id))
+            .await)?;
+        return Ok(());
+    }
+
+    let canonical_path = workspace_path.canonicalize()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| workspace_path.display().to_string());
+
+    let existing = load_existing_session(&canonical_path);
+
+    let mut response_lines = Vec::new();
+
+    {
+        let mut data = state.lock().await;
+        let session = data.sessions.entry(chat_id).or_insert_with(|| ChatSession {
+            session_id: None,
+            current_path: None,
+            history: Vec::new(),
+            pending_uploads: Vec::new(),
+            cleared: false,
+        });
+
+        if let Some((session_data, _)) = &existing {
+            session.session_id = Some(session_data.session_id.clone());
+            session.current_path = Some(canonical_path.clone());
+            session.history = session_data.history.clone();
+
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!("  [{ts}] ▶ Workspace session restored: {workspace_id} → {canonical_path}");
+            response_lines.push(format!("Session restored at `{}`.", canonical_path));
+
+            let header_len: usize = response_lines.iter().map(|l| l.len() + 1).sum();
+            let remaining = TELEGRAM_MSG_LIMIT.saturating_sub(header_len + 2);
+            let preview = build_history_preview(&session_data.history, remaining);
+            if !preview.is_empty() {
+                response_lines.push(String::new());
+                response_lines.push(preview);
+            }
+        } else {
+            // Workspace exists but no session — start a new session there
+            session.session_id = None;
+            session.current_path = Some(canonical_path.clone());
+            session.history.clear();
+
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!("  [{ts}] ▶ Workspace session started: {workspace_id} → {canonical_path}");
             response_lines.push(format!("Session started at `{}`.", canonical_path));
         }
     }
@@ -742,7 +1316,8 @@ async fn handle_start_command(
     }
 
     let response_text = response_lines.join("\n");
-    send_long_message(bot, chat_id, &response_text, None, state).await?;
+    let html = markdown_to_telegram_html(&response_text);
+    send_long_message(bot, chat_id, &html, Some(ParseMode::Html), state).await?;
 
     Ok(())
 }
@@ -768,8 +1343,9 @@ async fn handle_clear_command(
         }
     }
 
-    {
+    let current_path = {
         let mut data = state.lock().await;
+        let path = data.sessions.get(&chat_id).and_then(|s| s.current_path.clone());
         if let Some(session) = data.sessions.get_mut(&chat_id) {
             session.session_id = None;
             session.history.clear();
@@ -778,10 +1354,21 @@ async fn handle_clear_command(
         }
         data.cancel_tokens.remove(&chat_id);
         data.stop_message_ids.remove(&chat_id);
+        path
+    };
+
+    let mut msg = String::from("Session cleared.");
+    if let Some(ref path) = current_path {
+        msg.push_str(&format!("\nCurrent path: `{}`", path));
+        if let Some(folder_name) = std::path::Path::new(path).file_name().and_then(|n| n.to_str()) {
+            if is_workspace_id(folder_name) {
+                msg.push_str(&format!("\nUse /{} to resume this session.", folder_name));
+            }
+        }
     }
 
     shared_rate_limit_wait(state, chat_id).await;
-    tg!("send_message", bot.send_message(chat_id, "Session cleared.")
+    tg!("send_message", bot.send_message(chat_id, msg)
         .await)?;
 
     Ok(())
@@ -800,7 +1387,15 @@ async fn handle_pwd_command(
 
     shared_rate_limit_wait(state, chat_id).await;
     match current_path {
-        Some(path) => tg!("send_message", bot.send_message(chat_id, &path).await)?,
+        Some(path) => {
+            let mut msg = format!("`{}`", path);
+            if let Some(folder_name) = std::path::Path::new(&path).file_name().and_then(|n| n.to_str()) {
+                if is_workspace_id(folder_name) {
+                    msg.push_str(&format!("\nUse /{} to switch back to this session.", folder_name));
+                }
+            }
+            tg!("send_message", bot.send_message(chat_id, msg).await)?
+        }
         None => tg!("send_message", bot.send_message(chat_id, "No active session. Use /start <path> first.").await)?,
     };
 
@@ -1049,7 +1644,8 @@ async fn handle_shell_command(
     // Send placeholder message
     let cmd_display = cmd_str.to_string();
     shared_rate_limit_wait(state, chat_id).await;
-    let placeholder = tg!("send_message", bot.send_message(chat_id, format!("!{}에 대해서 처리중입니다.", &cmd_display)).await)?;
+    let placeholder = tg!("send_message", bot.send_message(chat_id, format!("Processing <code>{}</code>", html_escape(&cmd_display)))
+        .parse_mode(ParseMode::Html).await)?;
     let placeholder_msg_id = placeholder.id;
 
     // Register cancel token (lock) — must be AFTER placeholder send succeeds,
@@ -1199,11 +1795,12 @@ async fn handle_shell_command(
                     let indicator = SPINNER[spin_idx % SPINNER.len()];
                     spin_idx += 1;
 
-                    let display_text = format!("!{}에 대해서 처리중입니다.\n\n{}", cmd_display_owned, indicator);
+                    let display_text = format!("Processing <code>{}</code>\n\n{}", html_escape(&cmd_display_owned), indicator);
 
                     if display_text != last_edit_text {
                         shared_rate_limit_wait(&state_owned, chat_id).await;
-                        let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &display_text).await);
+                        let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &display_text)
+                            .parse_mode(ParseMode::Html).await);
                         last_edit_text = display_text;
                     } else {
                         shared_rate_limit_wait(&state_owned, chat_id).await;
@@ -1227,24 +1824,25 @@ async fn handle_shell_command(
 
                         if content_bytes <= 4000 {
                             // Short output: update placeholder with completion + result in one call
-                            let combined = format!("!{} 완료 (exit code: {})\n\n<pre>$ {}\n\n{}</pre>",
-                                cmd_display_owned, exit_code,
+                            let combined = format!("Done <code>{}</code> (exit code: {})\n\n<pre>$ {}\n\n{}</pre>",
+                                html_escape(&cmd_display_owned), exit_code,
                                 html_escape(&cmd_display_owned), html_escape(full_output.trim()));
                             shared_rate_limit_wait(&state_owned, chat_id).await;
                             if let Err(_) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &combined)
                                 .parse_mode(ParseMode::Html)
                                 .await)
                             {
-                                let fallback = format!("!{} 완료 (exit code: {})\n\n$ {}\n\n{}",
+                                let fallback = format!("Done {} (exit code: {})\n\n$ {}\n\n{}",
                                     cmd_display_owned, exit_code, cmd_display_owned, full_output.trim());
                                 shared_rate_limit_wait(&state_owned, chat_id).await;
                                 let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &fallback).await);
                             }
                         } else {
                             // Long output: update placeholder + send as .txt file
-                            let final_msg = format!("!{} 완료 (exit code: {})", cmd_display_owned, exit_code);
+                            let final_msg = format!("Done <code>{}</code> (exit code: {})", html_escape(&cmd_display_owned), exit_code);
                             shared_rate_limit_wait(&state_owned, chat_id).await;
-                            let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &final_msg).await);
+                            let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &final_msg)
+                                .parse_mode(ParseMode::Html).await);
 
                             let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
                             let tmp_path = format!("/tmp/cokacdir_shell_{}_{}.txt", chat_id.0, timestamp);
@@ -1259,9 +1857,10 @@ async fn handle_shell_command(
                         }
                     } else {
                         // No output
-                        let final_msg = format!("!{} 완료 (exit code: {})", cmd_display_owned, exit_code);
+                        let final_msg = format!("Done <code>{}</code> (exit code: {})", html_escape(&cmd_display_owned), exit_code);
                         shared_rate_limit_wait(&state_owned, chat_id).await;
-                        let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &final_msg).await);
+                        let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &final_msg)
+                            .parse_mode(ParseMode::Html).await);
                     }
                 }
 
@@ -1438,21 +2037,29 @@ async fn handle_setpollingtime_command(
     Ok(())
 }
 
-/// Handle /debug command - toggle API debug logging
+/// Handle /debug command - toggle all debug logging (Telegram API, Claude, cron)
 async fn handle_debug_command(
     bot: &Bot,
     chat_id: ChatId,
     state: &SharedState,
+    token: &str,
 ) -> ResponseResult<()> {
     let prev = TG_DEBUG.load(Ordering::Relaxed);
     let next = !prev;
     TG_DEBUG.store(next, Ordering::Relaxed);
+    crate::services::claude::DEBUG_ENABLED.store(next, Ordering::Relaxed);
+    {
+        let mut data = state.lock().await;
+        data.settings.debug = next;
+        save_bot_settings(token, &data.settings);
+    }
     let status = if next { "ON" } else { "OFF" };
     shared_rate_limit_wait(state, chat_id).await;
     tg!("send_message", bot.send_message(chat_id, format!("🔍 Debug logging: {status}"))
         .await)?;
     Ok(())
 }
+
 
 /// Handle /allowed command - add/remove tools
 /// Usage: /allowed +toolname  (add)
@@ -1616,6 +2223,95 @@ async fn handle_public_command(
     Ok(())
 }
 
+/// Resolve a model alias to pass through to Claude CLI.
+/// Only exact matches from the allowed list are accepted.
+fn resolve_model_name(name: &str) -> Option<String> {
+    match name {
+        "sonnet" | "opus" | "haiku" |
+        "sonnet[1m]" | "opus[1m]" | "haiku[1m]" => Some(name.to_string()),
+        _ => None,
+    }
+}
+
+/// Format a model name for display.
+fn display_model_name(model: &str) -> String {
+    model.to_string()
+}
+
+/// Handle /model command
+async fn handle_model_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: &str,
+    state: &SharedState,
+    token: &str,
+) -> ResponseResult<()> {
+    let arg = text.strip_prefix("/model").unwrap_or("").trim();
+
+    if arg.is_empty() {
+        // Show current model
+        let current = {
+            let data = state.lock().await;
+            get_model(&data.settings, chat_id)
+        };
+        let msg = match current {
+            Some(m) => format!("Current model: <b>{}</b>", display_model_name(&m)),
+            None => "Current model: <b>default</b>".to_string(),
+        };
+        shared_rate_limit_wait(state, chat_id).await;
+        tg!("send_message", bot.send_message(chat_id, msg)
+            .parse_mode(ParseMode::Html)
+            .await)?;
+        return Ok(());
+    }
+
+    // Reset to default
+    if arg.eq_ignore_ascii_case("default") || arg.eq_ignore_ascii_case("reset") {
+        {
+            let mut data = state.lock().await;
+            data.settings.models.remove(&chat_id.0.to_string());
+            save_bot_settings(token, &data.settings);
+        }
+        shared_rate_limit_wait(state, chat_id).await;
+        tg!("send_message", bot.send_message(chat_id, "Model reset to <b>default</b>.")
+            .parse_mode(ParseMode::Html)
+            .await)?;
+        return Ok(());
+    }
+
+    // Set model
+    match resolve_model_name(arg) {
+        Some(model_id) => {
+            let display = display_model_name(&model_id);
+            {
+                let mut data = state.lock().await;
+                data.settings.models.insert(chat_id.0.to_string(), model_id);
+                save_bot_settings(token, &data.settings);
+            }
+            shared_rate_limit_wait(state, chat_id).await;
+            tg!("send_message", bot.send_message(chat_id, format!("Model set to <b>{display}</b>."))
+                .parse_mode(ParseMode::Html)
+                .await)?;
+        }
+        None => {
+            shared_rate_limit_wait(state, chat_id).await;
+            tg!("send_message", bot.send_message(chat_id,
+                "Unknown model. Available:\n\
+                 <code>/model sonnet</code>\n\
+                 <code>/model opus</code>\n\
+                 <code>/model haiku</code>\n\
+                 <code>/model sonnet[1m]</code>\n\
+                 <code>/model opus[1m]</code>\n\
+                 <code>/model haiku[1m]</code>\n\
+                 <code>/model default</code> — reset to default")
+                .parse_mode(ParseMode::Html)
+                .await)?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Handle regular text messages - send to Claude AI
 async fn handle_text_message(
     bot: &Bot,
@@ -1623,8 +2319,8 @@ async fn handle_text_message(
     user_text: &str,
     state: &SharedState,
 ) -> ResponseResult<()> {
-    // Get session info, allowed tools, and pending uploads (drop lock before any await)
-    let (session_info, allowed_tools, pending_uploads) = {
+    // Get session info, allowed tools, model, and pending uploads (drop lock before any await)
+    let (session_info, allowed_tools, pending_uploads, model) = {
         let mut data = state.lock().await;
         let info = data.sessions.get(&chat_id).and_then(|session| {
             session.current_path.as_ref().map(|_| {
@@ -1632,6 +2328,7 @@ async fn handle_text_message(
             })
         });
         let tools = get_allowed_tools(&data.settings, chat_id);
+        let mdl = get_model(&data.settings, chat_id);
         // Drain pending uploads so they are sent to Claude exactly once
         let uploads = data.sessions.get_mut(&chat_id)
             .map(|s| {
@@ -1639,7 +2336,7 @@ async fn handle_text_message(
                 std::mem::take(&mut s.pending_uploads)
             })
             .unwrap_or_default();
-        (info, tools, uploads)
+        (info, tools, uploads, mdl)
     };
 
     let (session_id, current_path) = match session_info {
@@ -1690,22 +2387,12 @@ async fn handle_text_message(
         )
     };
 
-    // Build system prompt with sendfile instructions
-    let system_prompt_owned = format!(
-        "You are chatting with a user through Telegram.\n\
-         Current working directory: {}\n\n\
-         When your work produces a file the user would want (generated code, reports, images, archives, etc.),\n\
-         send it by running this bash command:\n\n\
-         cokacdir --sendfile <filepath> --chat {} --key {}\n\n\
-         This delivers the file directly to the user's Telegram chat.\n\
-         Do NOT tell the user to use /down — use the command above instead.\n\n\
-         Always keep the user informed about what you are doing. \
-         Briefly explain each step as you work (e.g. \"Reading the file...\", \"Creating the script...\", \"Running tests...\"). \
-         The user cannot see your tool calls, so narrate your progress so they know what is happening.\n\n\
-         IMPORTANT: The user is on Telegram and CANNOT interact with any interactive prompts, dialogs, or confirmation requests. \
-         All tools that require user interaction (such as AskUserQuestion, EnterPlanMode, ExitPlanMode) will NOT work. \
-         Never use tools that expect user interaction. If you need clarification, just ask in plain text.{}",
-        current_path, chat_id.0, token_hash(bot.token()), disabled_notice
+    // Build system prompt with sendfile and schedule instructions
+    let bot_key_for_prompt = token_hash(bot.token());
+    let system_prompt_owned = build_system_prompt(
+        "You are chatting with a user through Telegram.",
+        &current_path, chat_id.0, &bot_key_for_prompt, &disabled_notice,
+        session_id.as_deref(),
     );
 
     // Create cancel token for this request
@@ -1732,6 +2419,8 @@ async fn handle_text_message(
             Some(&system_prompt_owned),
             Some(&allowed_tools),
             Some(cancel_token_clone),
+            model.as_deref(),
+            false,
         );
 
         if let Err(e) = result {
@@ -1757,6 +2446,9 @@ async fn handle_text_message(
         let mut cancelled = false;
         let mut new_session_id: Option<String> = None;
         let mut spin_idx: usize = 0;
+        let mut pending_cokacdir_cmd: Option<String> = None;
+        let mut last_tool_name: String = String::new();
+
 
         let polling_time_ms = {
             let data = state_owned.lock().await;
@@ -1794,21 +2486,38 @@ async fn handle_text_message(
                                     full_response.push_str(&content);
                                 }
                                 StreamMessage::ToolUse { name, input } => {
+                                    pending_cokacdir_cmd = detect_cokacdir_command(&name, &input);
+                                    last_tool_name = name.clone();
                                     let summary = format_tool_input(&name, &input);
                                     let ts = chrono::Local::now().format("%H:%M:%S");
-                                    println!("  [{ts}]   ⚙ {name}: {}", truncate_str(&summary, 80));
-                                    full_response.push_str(&format!("\n\n⚙️ {}\n", summary));
+                                    println!("  [{ts}]   ⚙ {name}: {summary}");
+                                    if pending_cokacdir_cmd.is_none() {
+                                        if name == "Bash" {
+                                            full_response.push_str(&format!("\n\n```\n{}\n```\n", format_bash_command(&input)));
+                                        } else {
+                                            full_response.push_str(&format!("\n\n⚙️ {}\n", summary));
+                                        }
+                                    }
                                 }
                                 StreamMessage::ToolResult { content, is_error } => {
-                                    if is_error {
+                                    if let Some(cmd) = pending_cokacdir_cmd.take() {
                                         let ts = chrono::Local::now().format("%H:%M:%S");
-                                        println!("  [{ts}]   ✗ Error: {}", truncate_str(&content, 80));
+                                        println!("  [{ts}]   ↩ cokacdir --{cmd}: {content}");
+                                        let formatted = format_cokacdir_result(&cmd, &content);
+                                        if !formatted.is_empty() {
+                                            full_response.push_str(&format!("\n{}\n", formatted));
+                                        }
+                                    } else if is_error {
+                                        let ts = chrono::Local::now().format("%H:%M:%S");
+                                        println!("  [{ts}]   ✗ Error: {content}");
                                         let truncated = truncate_str(&content, 500);
                                         if truncated.contains('\n') {
                                             full_response.push_str(&format!("\n❌\n```\n{}\n```\n", truncated));
                                         } else {
                                             full_response.push_str(&format!("\n❌ `{}`\n\n", truncated));
                                         }
+                                    } else if last_tool_name == "Read" {
+                                        full_response.push_str(&format!("\n✅ `{} bytes`\n\n", content.len()));
                                     } else if !content.is_empty() {
                                         let truncated = truncate_str(&content, 300);
                                         if truncated.contains('\n') {
@@ -2169,14 +2878,12 @@ fn save_session_to_file(session: &ChatSession, current_path: &str) {
         created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
     };
 
-    let file_path = sessions_dir.join(format!("{}.json", session_id));
-
-    // Security: Verify the path is within sessions directory
-    if let Some(parent) = file_path.parent() {
-        if parent != sessions_dir {
-            return;
-        }
+    // Security: whitelist session_id to alphanumeric, hyphens, underscores only
+    if !session_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return;
     }
+
+    let file_path = sessions_dir.join(format!("{}.json", session_id));
 
     if let Ok(json) = serde_json::to_string_pretty(&session_data) {
         let _ = fs::write(file_path, json);
@@ -2591,10 +3298,126 @@ fn find_closing_single(chars: &[char], start: usize, marker: char) -> Option<usi
     None
 }
 
+/// Check if a Bash tool call is an internal cokacdir command.
+/// Returns the subcommand name (e.g. "cron", "cron-list", "currenttime", "sendfile") or None.
+fn detect_cokacdir_command(name: &str, input: &str) -> Option<String> {
+    if name != "Bash" { return None; }
+    let v: serde_json::Value = serde_json::from_str(input).ok()?;
+    let cmd = v.get("command").and_then(|v| v.as_str()).unwrap_or("");
+    let trimmed = cmd.trim_start();
+    if !trimmed.starts_with("cokacdir") { return None; }
+    // Extract the first --xxx flag after "cokacdir"
+    for token in trimmed.split_whitespace().skip(1) {
+        if let Some(flag) = token.strip_prefix("--") {
+            return Some(flag.to_string());
+        }
+    }
+    Some("unknown".to_string())
+}
+
+/// Read the most recent .result file from schedule dir and delete it
+fn read_latest_cron_result() -> Option<String> {
+    let dir = schedule_dir()?;
+    let mut results: Vec<_> = fs::read_dir(&dir).ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map(|ext| ext == "result").unwrap_or(false))
+        .collect();
+    results.sort_by_key(|e| std::cmp::Reverse(e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH)));
+    let entry = results.first()?;
+    let content = fs::read_to_string(entry.path()).ok()?;
+    let _ = fs::remove_file(entry.path());
+    Some(content)
+}
+
+/// Format a cokacdir command's JSON result into a human-readable message
+fn format_cokacdir_result(cmd: &str, content: &str) -> String {
+    // Try to parse as JSON; if empty and cmd is "cron", try reading from .result file
+    let effective_content = if content.trim().is_empty() && cmd == "cron" {
+        read_latest_cron_result().unwrap_or_default()
+    } else {
+        content.to_string()
+    };
+    let v: serde_json::Value = match serde_json::from_str(effective_content.trim()) {
+        Ok(v) => v,
+        Err(_) => return effective_content.to_string(),
+    };
+
+    let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
+
+    if status == "error" {
+        let msg = v.get("message").and_then(|s| s.as_str()).unwrap_or("unknown error");
+        return format!("❌ {}", msg);
+    }
+
+    match cmd {
+        "currenttime" => {
+            let time = v.get("time").and_then(|s| s.as_str()).unwrap_or("?");
+            format!("🕐 {}", time)
+        }
+        "cron" => {
+            let id = v.get("id").and_then(|s| s.as_str()).unwrap_or("?");
+            let prompt = v.get("prompt").and_then(|s| s.as_str()).unwrap_or("");
+            let schedule = v.get("schedule").and_then(|s| s.as_str()).unwrap_or("");
+            let kind = if schedule.split_whitespace().count() == 5 { "cron" } else { "once" };
+            format!("✅ Scheduled [{}]\n🔖 {}\n📝 {}\n🕐 `{}`", kind, id, prompt, schedule)
+        }
+        "cron-list" => {
+            let schedules = v.get("schedules").and_then(|a| a.as_array());
+            match schedules {
+                Some(arr) if arr.is_empty() => "📋 No schedules found.".to_string(),
+                Some(arr) => {
+                    let mut lines = vec![format!("📋 {} schedule(s)", arr.len())];
+                    for (i, s) in arr.iter().enumerate() {
+                        let id = s.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                        let schedule = s.get("schedule").and_then(|v| v.as_str()).unwrap_or("");
+                        let prompt = s.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+                        let prompt_preview = if prompt.chars().count() > 40 {
+                            format!("{}...", prompt.chars().take(40).collect::<String>())
+                        } else {
+                            prompt.to_string()
+                        };
+                        lines.push(format!("\n{}. {}\n   🕐 `{}`\n   🔖 {}", i + 1, prompt_preview, schedule, id));
+                    }
+                    lines.join("\n")
+                }
+                None => content.to_string(),
+            }
+        }
+        "cron-remove" => {
+            let id = v.get("id").and_then(|s| s.as_str()).unwrap_or("?");
+            format!("✅ Removed\n🔖 {}", id)
+        }
+        "cron-update" => {
+            let id = v.get("id").and_then(|s| s.as_str()).unwrap_or("?");
+            let schedule = v.get("schedule").and_then(|s| s.as_str()).unwrap_or("");
+            format!("✅ Updated\n🕐 `{}`\n🔖 {}", schedule, id)
+        }
+        "sendfile" => {
+            let path = v.get("path").and_then(|s| s.as_str()).unwrap_or("?");
+            format!("📎 {}", path)
+        }
+        _ => content.to_string(),
+    }
+}
+
+/// Extract the command string (with optional description) from a Bash tool input JSON
+fn format_bash_command(input: &str) -> String {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(input) else {
+        return input.to_string();
+    };
+    let desc = v.get("description").and_then(|v| v.as_str()).unwrap_or("");
+    let cmd = v.get("command").and_then(|v| v.as_str()).unwrap_or("");
+    if !desc.is_empty() {
+        format!("{}\n{}", desc, cmd)
+    } else {
+        cmd.to_string()
+    }
+}
+
 /// Format tool input JSON into a human-readable summary
 fn format_tool_input(name: &str, input: &str) -> String {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(input) else {
-        return format!("{} {}", name, truncate_str(input, 200));
+        return format!("{} {}", name, input);
     };
 
     match name {
@@ -2602,9 +3425,9 @@ fn format_tool_input(name: &str, input: &str) -> String {
             let desc = v.get("description").and_then(|v| v.as_str()).unwrap_or("");
             let cmd = v.get("command").and_then(|v| v.as_str()).unwrap_or("");
             if !desc.is_empty() {
-                format!("{}: `{}`", desc, truncate_str(cmd, 150))
+                format!("{}: `{}`", desc, cmd)
             } else {
-                format!("`{}`", truncate_str(cmd, 200))
+                format!("`{}`", cmd)
             }
         }
         "Read" => {
@@ -2711,7 +3534,7 @@ fn format_tool_input(name: &str, input: &str) -> String {
             if let Some(questions) = v.get("questions").and_then(|v| v.as_array()) {
                 if let Some(q) = questions.first() {
                     let question = q.get("question").and_then(|v| v.as_str()).unwrap_or("");
-                    truncate_str(question, 200)
+                    question.to_string()
                 } else {
                     "Ask user question".to_string()
                 }
@@ -2746,8 +3569,639 @@ fn format_tool_input(name: &str, input: &str) -> String {
             "List tasks".to_string()
         }
         _ => {
-            format!("{} {}", name, truncate_str(input, 200))
+            format!("{} {}", name, input)
         }
     }
 }
 
+// === Scheduler ===
+
+/// Check if a schedule entry should trigger now
+fn should_trigger(entry: &ScheduleEntry) -> bool {
+    let now = chrono::Local::now();
+    match entry.schedule_type.as_str() {
+        "absolute" => {
+            let Ok(schedule_time) = chrono::NaiveDateTime::parse_from_str(&entry.schedule, "%Y-%m-%d %H:%M:%S") else {
+                return false;
+            };
+            let schedule_dt = schedule_time.and_local_timezone(chrono::Local).single();
+            let Some(schedule_dt) = schedule_dt else { return false };
+            if now < schedule_dt { return false; }
+            // Already ran?
+            if let Some(ref last) = entry.last_run {
+                if let Ok(last_dt) = chrono::NaiveDateTime::parse_from_str(last, "%Y-%m-%d %H:%M:%S") {
+                    if let Some(last_local) = last_dt.and_local_timezone(chrono::Local).single() {
+                        if last_local >= schedule_dt { return false; }
+                    }
+                }
+            }
+            true
+        }
+        "cron" => {
+            if !cron_matches(&entry.schedule, now) { return false; }
+            // Check last_run to avoid duplicate triggers within the same minute
+            if let Some(ref last) = entry.last_run {
+                if let Ok(last_dt) = chrono::NaiveDateTime::parse_from_str(last, "%Y-%m-%d %H:%M:%S") {
+                    if let Some(last_local) = last_dt.and_local_timezone(chrono::Local).single() {
+                        let now_min = now.format("%Y-%m-%d %H:%M").to_string();
+                        let last_min = last_local.format("%Y-%m-%d %H:%M").to_string();
+                        if now_min == last_min { return false; }
+                    }
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Update schedule entry after a run: set last_run, delete if once
+fn update_schedule_after_run(entry: &ScheduleEntry, new_context_summary: Option<String>) {
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+    // 실행 중 사용자가 삭제한 경우 부활 방지
+    let dir = match schedule_dir() {
+        Some(d) => d,
+        None => return,
+    };
+    let path = dir.join(format!("{}.json", entry.id));
+    if !path.exists() {
+        return; // 이미 삭제됨 - write하지 않음
+    }
+
+    if entry.once || entry.schedule_type == "absolute" {
+        // Set last_run first to prevent re-trigger if delete fails
+        let mut updated = entry.clone();
+        updated.last_run = Some(now.clone());
+        if let Err(e) = write_schedule_entry(&updated) {
+            eprintln!("[Schedule] Failed to write entry {} before delete: {}", entry.id, e);
+        }
+        delete_schedule_entry(&entry.id);
+    } else {
+        let mut updated = entry.clone();
+        updated.last_run = Some(now);
+        if new_context_summary.is_some() {
+            updated.context_summary = new_context_summary;
+        }
+        if let Err(e) = write_schedule_entry(&updated) {
+            eprintln!("[Schedule] Failed to update entry {}: {}", entry.id, e);
+        }
+    }
+}
+
+/// Execute a scheduled task — similar pattern to handle_text_message
+async fn execute_schedule(
+    bot: &Bot,
+    chat_id: ChatId,
+    entry: &ScheduleEntry,
+    state: &SharedState,
+    token: &str,
+    prev_session: Option<ChatSession>,
+) {
+    // Build prompt with context summary if available
+    let user_prompt = entry.prompt.clone();
+    let prompt = if let Some(ref summary) = entry.context_summary {
+        format!(
+            "[이전 작업 맥락]\n{}\n\n[작업 지시]\n{}",
+            summary, user_prompt
+        )
+    } else {
+        user_prompt.clone()
+    };
+    let project_path = entry.current_path.clone();
+    let schedule_id = entry.id.clone();
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    println!("  [{ts}] ⏰ Schedule Starting: {user_prompt}");
+
+    // Create persistent workspace directory for this schedule execution
+    let workspace_dir = dirs::home_dir()
+        .map(|h| h.join(".cokacdir").join("workspace").join(&schedule_id))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp").join("cokacdir-workspace").join(&schedule_id));
+    if let Err(e) = fs::create_dir_all(&workspace_dir) {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!("  [{ts}] ⚠ [Schedule] Failed to create workspace: {e}");
+        let mut data = state.lock().await;
+        if let Some(set) = data.pending_schedules.get_mut(&chat_id) {
+            set.remove(&schedule_id);
+        }
+        data.cancel_tokens.remove(&chat_id);
+        if let Some(prev) = prev_session {
+            data.sessions.insert(chat_id, prev);
+        } else {
+            data.sessions.remove(&chat_id);
+        }
+        return;
+    }
+    let workspace_path = workspace_dir.display().to_string();
+
+    // Get allowed tools and model for this chat
+    let (allowed_tools, model) = {
+        let data = state.lock().await;
+        (get_allowed_tools(&data.settings, chat_id), get_model(&data.settings, chat_id))
+    };
+
+    // Send placeholder (show only the user's original prompt, not the context summary)
+    shared_rate_limit_wait(state, chat_id).await;
+    let placeholder = match tg!("send_message", bot.send_message(chat_id, format!("⏰ {user_prompt}")).await) {
+        Ok(msg) => msg,
+        Err(e) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!("  [{ts}] ⚠ [Schedule] Failed to send placeholder: {e}");
+            // Clean up pending + cancel_token, restore session (workspace preserved)
+            let mut data = state.lock().await;
+            if let Some(set) = data.pending_schedules.get_mut(&chat_id) {
+                set.remove(&schedule_id);
+            }
+            data.cancel_tokens.remove(&chat_id);
+            if let Some(prev) = prev_session {
+                data.sessions.insert(chat_id, prev);
+            } else {
+                data.sessions.remove(&chat_id);
+            }
+            return;
+        }
+    };
+    let placeholder_msg_id = placeholder.id;
+
+    // Build disabled tools notice
+    let default_tools: std::collections::HashSet<&str> = DEFAULT_ALLOWED_TOOLS.iter().copied().collect();
+    let allowed_set: std::collections::HashSet<&str> = allowed_tools.iter().map(|s| s.as_str()).collect();
+    let disabled: Vec<&&str> = default_tools.iter().filter(|t| !allowed_set.contains(**t)).collect();
+    let disabled_notice = if disabled.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<&str> = disabled.iter().map(|t| **t).collect();
+        format!(
+            "\n\nDISABLED TOOLS: The following tools have been disabled by the user: {}.\n\
+             You MUST NOT attempt to use these tools. \
+             If a user's request requires a disabled tool, do NOT proceed with the task. \
+             Instead, clearly inform the user which tool is needed and that it is currently disabled. \
+             Suggest they re-enable it with: /allowed +ToolName",
+            names.join(", ")
+        )
+    };
+
+    let bot_key = token_hash(token);
+    let system_prompt_owned = build_system_prompt(
+        &format!(
+            "You are executing a scheduled task through Telegram.\n\
+             Project directory: {project_path}\n\
+             Your current working directory is a dedicated workspace for this schedule.\n\
+             This workspace will be preserved after execution. The user can continue work here via /start.\n\
+             To work with project files, use absolute paths to the project directory.\n\
+             Any files you want to deliver must be sent via the cokacdir --sendfile command before the task ends."
+        ),
+        &workspace_path, chat_id.0, &bot_key, &disabled_notice,
+        None, // scheduled tasks don't need to register further schedules with session context
+    );
+
+    // Retrieve pre-inserted cancel token (from scheduler_loop), or create a new one
+    let cancel_token = {
+        let mut data = state.lock().await;
+        if let Some(existing) = data.cancel_tokens.get(&chat_id) {
+            existing.clone()
+        } else {
+            let token = Arc::new(CancelToken::new());
+            data.cancel_tokens.insert(chat_id, token.clone());
+            token
+        }
+    };
+
+    // Create channel for streaming
+    let (tx, rx) = mpsc::channel();
+    let cancel_token_clone = cancel_token.clone();
+    let model_for_summary = model.clone();
+
+    // Run Claude in a blocking thread (always new session — context is in the prompt)
+    // Session persistence must be kept so users can resume via /SCHEDULE_ID
+    let workspace_path_for_claude = workspace_path.clone();
+    tokio::task::spawn_blocking(move || {
+        let result = claude::execute_command_streaming(
+            &prompt,
+            None,
+            &workspace_path_for_claude,
+            tx.clone(),
+            Some(&system_prompt_owned),
+            Some(&allowed_tools),
+            Some(cancel_token_clone),
+            model.as_deref(),
+            false,
+        );
+        if let Err(e) = result {
+            let _ = tx.send(StreamMessage::Error { message: e, stdout: String::new(), stderr: String::new(), exit_code: None });
+        }
+    });
+
+    // Polling loop
+    let bot_owned = bot.clone();
+    let state_owned = state.clone();
+    let entry_clone = entry.clone();
+    let workspace_path_owned = workspace_path.clone();
+    tokio::spawn(async move {
+        const SPINNER: &[&str] = &[
+            "🕐 P",           "🕑 Pr",          "🕒 Pro",
+            "🕓 Proc",        "🕔 Proce",       "🕕 Proces",
+            "🕖 Process",     "🕗 Processi",    "🕘 Processin",
+            "🕙 Processing",  "🕚 Processing.", "🕛 Processing..",
+        ];
+        let mut full_response = String::new();
+        let mut last_edit_text = String::new();
+        let mut done = false;
+        let mut cancelled = false;
+        let mut had_error = false;
+        let mut spin_idx: usize = 0;
+        let mut pending_cokacdir_cmd: Option<String> = None;
+        let mut last_tool_name: String = String::new();
+        let mut exec_session_id: Option<String> = None;
+
+        let polling_time_ms = {
+            let data = state_owned.lock().await;
+            data.polling_time_ms
+        };
+
+        let mut queue_done = false;
+        while !done || !queue_done {
+            if cancel_token.cancelled.load(Ordering::Relaxed) {
+                if !done { cancelled = true; }
+                break;
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(polling_time_ms)).await;
+
+            if cancel_token.cancelled.load(Ordering::Relaxed) {
+                if !done { cancelled = true; }
+                break;
+            }
+
+            // Drain messages
+            loop {
+                match rx.try_recv() {
+                    Ok(msg) => {
+                        match msg {
+                            StreamMessage::Init { session_id } => {
+                                exec_session_id = Some(session_id);
+                            }
+                            StreamMessage::Text { content } => {
+                                full_response.push_str(&content);
+                            }
+                            StreamMessage::ToolUse { name, input } => {
+                                pending_cokacdir_cmd = detect_cokacdir_command(&name, &input);
+                                last_tool_name = name.clone();
+                                let summary = format_tool_input(&name, &input);
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                println!("  [{ts}]   ⚙ [Schedule] {name}: {summary}");
+                                if pending_cokacdir_cmd.is_none() {
+                                    if name == "Bash" {
+                                        full_response.push_str(&format!("\n\n```\n{}\n```\n", format_bash_command(&input)));
+                                    } else {
+                                        full_response.push_str(&format!("\n\n⚙️ {}\n", summary));
+                                    }
+                                }
+                            }
+                            StreamMessage::ToolResult { content, is_error } => {
+                                if let Some(cmd) = pending_cokacdir_cmd.take() {
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    println!("  [{ts}]   ↩ [Schedule] cokacdir --{cmd}: {content}");
+                                    let formatted = format_cokacdir_result(&cmd, &content);
+                                    if !formatted.is_empty() {
+                                        full_response.push_str(&format!("\n{}\n", formatted));
+                                    }
+                                } else if is_error {
+                                    let truncated = truncate_str(&content, 500);
+                                    if truncated.contains('\n') {
+                                        full_response.push_str(&format!("\n❌\n```\n{}\n```\n", truncated));
+                                    } else {
+                                        full_response.push_str(&format!("\n❌ `{}`\n\n", truncated));
+                                    }
+                                } else if last_tool_name == "Read" {
+                                    full_response.push_str(&format!("\n✅ `{} bytes`\n\n", content.len()));
+                                } else if !content.is_empty() {
+                                    let truncated = truncate_str(&content, 300);
+                                    if truncated.contains('\n') {
+                                        full_response.push_str(&format!("\n```\n{}\n```\n", truncated));
+                                    } else {
+                                        full_response.push_str(&format!("\n✅ `{}`\n\n", truncated));
+                                    }
+                                }
+                            }
+                            StreamMessage::TaskNotification { summary, .. } => {
+                                if !summary.is_empty() {
+                                    full_response.push_str(&format!("\n[Task: {}]\n", summary));
+                                }
+                            }
+                            StreamMessage::Done { result, session_id } => {
+                                if !result.is_empty() && full_response.is_empty() {
+                                    full_response = result;
+                                }
+                                if let Some(sid) = session_id {
+                                    exec_session_id = Some(sid);
+                                }
+                                done = true;
+                            }
+                            StreamMessage::Error { message, stdout, stderr, exit_code } => {
+                                let stdout_display = if stdout.is_empty() { "(empty)".to_string() } else { stdout };
+                                let stderr_display = if stderr.is_empty() { "(empty)".to_string() } else { stderr };
+                                let code_display = match exit_code {
+                                    Some(c) => c.to_string(),
+                                    None => "(unknown)".to_string(),
+                                };
+                                // Check if this is a result-type error (from parse_stream_message)
+                                // vs a process-level error. Both mean execution didn't complete normally.
+                                full_response = format!(
+                                    "Error: {}\n```\nexit code: {}\n\n[stdout]\n{}\n\n[stderr]\n{}\n```",
+                                    message, code_display, stdout_display, stderr_display
+                                );
+                                had_error = true;
+                                done = true;
+                            }
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        if !done { had_error = true; }
+                        done = true;
+                        break;
+                    }
+                }
+            }
+
+            // Update placeholder with progress
+            if !done {
+                let indicator = SPINNER[spin_idx % SPINNER.len()];
+                spin_idx += 1;
+
+                let display_text = if full_response.is_empty() {
+                    format!("⏰ {}\n\n{}", entry_clone.prompt, indicator)
+                } else {
+                    let normalized = normalize_empty_lines(&full_response);
+                    let truncated = truncate_str(&normalized, TELEGRAM_MSG_LIMIT - 40);
+                    format!("⏰ {}\n\n{}\n\n{}", entry_clone.prompt, truncated, indicator)
+                };
+
+                if display_text != last_edit_text {
+                    shared_rate_limit_wait(&state_owned, chat_id).await;
+                    let html_text = markdown_to_telegram_html(&display_text);
+                    let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_text)
+                        .parse_mode(ParseMode::Html)
+                        .await);
+                    last_edit_text = display_text;
+                } else {
+                    shared_rate_limit_wait(&state_owned, chat_id).await;
+                    let _ = tg!("send_chat_action", bot_owned.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await);
+                }
+            }
+
+            // Queue processing
+            let queued = process_upload_queue(&bot_owned, chat_id, &state_owned).await;
+            if done {
+                queue_done = !queued;
+            }
+        }
+
+        // Final response
+        if cancelled {
+            if let Ok(guard) = cancel_token.child_pid.lock() {
+                if let Some(pid) = *guard {
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                    }
+                }
+            }
+
+            shared_rate_limit_wait(&state_owned, chat_id).await;
+            let stopped_text = format!("⏰ {}\n\n⛔ Stopped\n\nUse /{} to continue this schedule session.", entry_clone.prompt, schedule_id);
+            let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, stopped_text).await);
+
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!("  [{ts}] ■ [Schedule] Stopped");
+        } else {
+            if full_response.is_empty() {
+                full_response = "(No response)".to_string();
+            }
+
+            let final_text = format!("⏰ {}\n\n{}\n\nUse /{} to continue this schedule session.", entry_clone.prompt, normalize_empty_lines(&full_response), schedule_id);
+            let html_response = markdown_to_telegram_html(&final_text);
+
+            shared_rate_limit_wait(&state_owned, chat_id).await;
+            if html_response.len() <= TELEGRAM_MSG_LIMIT {
+                if let Err(_) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_response)
+                    .parse_mode(ParseMode::Html)
+                    .await)
+                {
+                    shared_rate_limit_wait(&state_owned, chat_id).await;
+                    let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &final_text).await);
+                }
+            } else {
+                let send_result = send_long_message(&bot_owned, chat_id, &html_response, Some(ParseMode::Html), &state_owned).await;
+                match send_result {
+                    Ok(_) => {
+                        shared_rate_limit_wait(&state_owned, chat_id).await;
+                        let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
+                    }
+                    Err(_) => {
+                        let fallback = send_long_message(&bot_owned, chat_id, &final_text, None, &state_owned).await;
+                        match fallback {
+                            Ok(_) => {
+                                shared_rate_limit_wait(&state_owned, chat_id).await;
+                                let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
+                            }
+                            Err(_) => {
+                                shared_rate_limit_wait(&state_owned, chat_id).await;
+                                let truncated = truncate_str(&final_text, TELEGRAM_MSG_LIMIT);
+                                let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated).await);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!("  [{ts}] ✓ [Schedule] Done");
+        }
+
+        // For cron entries with context_summary, extract result summary for next run
+        // Skip if execution was cancelled or encountered an error
+        let new_context_summary = if !cancelled && !had_error && entry_clone.schedule_type == "cron" && !entry_clone.once && entry_clone.context_summary.is_some() {
+            if let Some(ref sid) = exec_session_id {
+                let sid = sid.clone();
+                let path = workspace_path_owned.clone();
+                let model = model_for_summary.clone();
+                let summary_result = tokio::task::spawn_blocking(move || {
+                    claude::extract_result_summary(
+                        &sid,
+                        &path,
+                        model.as_deref(),
+                    )
+                }).await;
+                match summary_result {
+                    Ok(Ok(summary)) => Some(summary),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Save schedule session to file so user can resume via /start [workspace_path]
+        if let Some(ref sid) = exec_session_id {
+            let mut sched_session = ChatSession {
+                session_id: Some(sid.clone()),
+                current_path: Some(workspace_path_owned.clone()),
+                history: Vec::new(),
+                pending_uploads: Vec::new(),
+                cleared: false,
+            };
+            // Add user prompt and AI response to history for session continuity
+            sched_session.history.push(HistoryItem {
+                item_type: HistoryType::User,
+                content: entry_clone.prompt.clone(),
+            });
+            if !full_response.is_empty() {
+                sched_session.history.push(HistoryItem {
+                    item_type: HistoryType::Assistant,
+                    content: full_response.clone(),
+                });
+            }
+            save_session_to_file(&sched_session, &workspace_path_owned);
+        }
+
+        // Update schedule file (last_run / delete if once)
+        update_schedule_after_run(&entry_clone, new_context_summary);
+
+        // Workspace directory is preserved for user to continue work via /start
+
+        // Clean up + restore previous session
+        {
+            let mut data = state_owned.lock().await;
+            data.cancel_tokens.remove(&chat_id);
+            if let Some(set) = data.pending_schedules.get_mut(&chat_id) {
+                set.remove(&schedule_id);
+            }
+            if let Some(prev) = prev_session {
+                data.sessions.insert(chat_id, prev);
+            } else {
+                // No prior session existed — remove the schedule's temporary session
+                data.sessions.remove(&chat_id);
+            }
+        }
+
+        // Clean up leftover stop message
+        let stop_msg_id = {
+            let mut data = state_owned.lock().await;
+            data.stop_message_ids.remove(&chat_id)
+        };
+        if let Some(msg_id) = stop_msg_id {
+            shared_rate_limit_wait(&state_owned, chat_id).await;
+            let _ = tg!("delete_message", bot_owned.delete_message(chat_id, msg_id).await);
+        }
+    });
+}
+
+/// Scheduler loop: runs every 60 seconds, checks for due schedules
+async fn scheduler_loop(bot: Bot, state: SharedState, token: String) {
+    let bot_key = token_hash(&token);
+
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+        // Scan schedule directory
+        let entries = list_schedule_entries(&bot_key, None);
+        if entries.is_empty() { continue; }
+
+        for entry in &entries {
+            let chat_id = ChatId(entry.chat_id);
+
+            // Verify current_path exists (before acquiring lock — involves filesystem I/O)
+            if !Path::new(&entry.current_path).is_dir() {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!("  [{ts}] ⚠ [Scheduler] Path not found: {} (schedule: {})", entry.current_path, entry.id);
+                shared_rate_limit_wait(&state, chat_id).await;
+                let msg = format!("⏰ {}\n\n⚠️ Skipped — path no longer exists\n📂 <code>{}</code>",
+                    html_escape(&truncate_str(&entry.prompt, 40)), html_escape(&entry.current_path));
+                let _ = tg!("send_message", bot.send_message(chat_id, msg).parse_mode(ParseMode::Html).await);
+                continue;
+            }
+
+            // Single atomic lock: pending check + trigger check + busy check + session backup
+            // All checks in one lock to prevent race between pending cleanup and re-trigger
+            enum SchedAction {
+                Skip,
+                DiscardExpired,
+                Execute(Option<ChatSession>),
+            }
+
+            let action = {
+                let mut data = state.lock().await;
+                let is_already_pending = data.pending_schedules.get(&chat_id)
+                    .map_or(false, |set| set.contains(&entry.id));
+
+                // If not pending and not due to trigger, skip
+                if !is_already_pending && !should_trigger(entry) {
+                    // Check if expired absolute schedule should be discarded
+                    if entry.schedule_type == "absolute" {
+                        if let Ok(schedule_time) = chrono::NaiveDateTime::parse_from_str(&entry.schedule, "%Y-%m-%d %H:%M:%S") {
+                            if let Some(schedule_dt) = schedule_time.and_local_timezone(chrono::Local).single() {
+                                if chrono::Local::now() > schedule_dt {
+                                    SchedAction::DiscardExpired
+                                } else {
+                                    SchedAction::Skip
+                                }
+                            } else {
+                                SchedAction::Skip
+                            }
+                        } else {
+                            SchedAction::Skip
+                        }
+                    } else {
+                        SchedAction::Skip
+                    }
+                } else {
+                    // Entry should execute — check if chat is busy
+                    let is_busy = data.cancel_tokens.contains_key(&chat_id);
+
+                    if is_busy {
+                        // Chat is busy — mark as pending if not already, retry next cycle
+                        // Do NOT touch sessions — leave them as-is
+                        if !is_already_pending {
+                            data.pending_schedules.entry(chat_id).or_default().insert(entry.id.clone());
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            println!("  [{ts}] ⏰ [Scheduler] Chat busy, pending: {}", entry.id);
+                        }
+                        SchedAction::Skip
+                    } else {
+                        // Not busy — backup session, replace with schedule-specific session, and execute
+                        let prev = data.sessions.get(&chat_id).cloned();
+                        data.sessions.insert(chat_id, ChatSession {
+                            session_id: None,
+                            current_path: Some(entry.current_path.clone()),
+                            history: Vec::new(),
+                            pending_uploads: Vec::new(),
+                            cleared: false,
+                        });
+                        data.pending_schedules.entry(chat_id).or_default().insert(entry.id.clone());
+                        // Pre-insert cancel_token to prevent race with incoming user messages
+                        let cancel_token = Arc::new(CancelToken::new());
+                        data.cancel_tokens.insert(chat_id, cancel_token);
+                        SchedAction::Execute(prev)
+                    }
+                }
+            };
+
+            match action {
+                SchedAction::Skip => continue,
+                SchedAction::DiscardExpired => {
+                    delete_schedule_entry(&entry.id);
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!("  [{ts}] ⏰ [Scheduler] Discarded expired once-schedule: {}", entry.id);
+                    continue;
+                }
+                SchedAction::Execute(prev_session) => {
+                    execute_schedule(&bot, chat_id, entry, &state, &token, prev_session).await;
+                }
+            }
+        }
+    }
+}

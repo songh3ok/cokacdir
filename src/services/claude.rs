@@ -2,9 +2,37 @@ use std::process::{Command, Stdio};
 use std::io::{BufRead, BufReader, Write};
 use std::sync::mpsc::Sender;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::fs::OpenOptions;
 use regex::Regex;
 use serde_json::Value;
+
+/// Global debug flag — toggled by /debug command or COKACDIR_DEBUG=1 env var
+pub static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Initialize debug flag from environment variable or bot_settings.json (call once at startup)
+pub fn init_debug_from_env() {
+    if std::env::var("COKACDIR_DEBUG").map(|v| v == "1").unwrap_or(false) {
+        DEBUG_ENABLED.store(true, Ordering::Relaxed);
+        return;
+    }
+    // Also check bot_settings.json for any bot with debug=true
+    if let Some(home) = dirs::home_dir() {
+        let path = home.join(".cokacdir").join("bot_settings.json");
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(obj) = json.as_object() {
+                    for (_key, entry) in obj {
+                        if entry.get("debug").and_then(|v| v.as_bool()).unwrap_or(false) {
+                            DEBUG_ENABLED.store(true, Ordering::Relaxed);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// Cached path to the claude binary.
 /// Once resolved, reused for all subsequent calls.
@@ -45,17 +73,17 @@ fn get_claude_path() -> Option<&'static str> {
     CLAUDE_PATH.get_or_init(|| resolve_claude_path()).as_deref()
 }
 
-/// Debug logging helper (only active when COKACDIR_DEBUG=1)
-fn debug_log(msg: &str) {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let enabled = ENABLED.get_or_init(|| {
-        std::env::var("COKACDIR_DEBUG").map(|v| v == "1").unwrap_or(false)
-    });
-    if !*enabled { return; }
+/// Debug logging helper (active when /debug toggled ON or COKACDIR_DEBUG=1)
+pub fn debug_log(msg: &str) {
+    debug_log_to("claude.log", msg);
+}
+
+pub fn debug_log_to(filename: &str, msg: &str) {
+    if !DEBUG_ENABLED.load(Ordering::Relaxed) { return; }
     if let Some(home) = dirs::home_dir() {
         let debug_dir = home.join(".cokacdir").join("debug");
         let _ = std::fs::create_dir_all(&debug_dir);
-        let log_path = debug_dir.join("claude.log");
+        let log_path = debug_dir.join(filename);
         if let Ok(mut file) = OpenOptions::new()
             .create(true)
             .append(true)
@@ -135,6 +163,7 @@ pub fn execute_command(
     session_id: Option<&str>,
     working_dir: &str,
     allowed_tools: Option<&[String]>,
+    model: Option<&str>,
 ) -> ClaudeResponse {
     let tools_str = match allowed_tools {
         Some(tools) => tools.join(","),
@@ -176,6 +205,12 @@ IMPORTANT: Format your responses using Markdown for better readability:
 - Use headers (## Title) to organize longer responses
 - Keep formatting minimal and terminal-friendly"#.to_string(),
     ];
+
+    // Set model if specified
+    if let Some(m) = model {
+        args.push("--model".to_string());
+        args.push(m.to_string());
+    }
 
     // Resume session if available
     if let Some(sid) = session_id {
@@ -299,6 +334,246 @@ fn parse_claude_output(output: &str) -> ClaudeResponse {
     }
 }
 
+/// Extract a context summary from an existing session for scheduled task isolation.
+/// Forks the session, asks Claude to summarize the context relevant to the schedule prompt,
+/// and returns the summary text (not a session_id).
+pub fn extract_context_summary(session_id: &str, schedule_prompt: &str, working_dir: &str) -> Result<String, String> {
+    debug_log("=== extract_context_summary START ===");
+    debug_log(&format!("  session_id: {}", session_id));
+    debug_log(&format!("  schedule_prompt: {}", schedule_prompt));
+    debug_log(&format!("  working_dir: {}", working_dir));
+
+    if !is_valid_session_id(session_id) {
+        debug_log("  ERROR: Invalid session ID format");
+        return Err("Invalid session ID format".to_string());
+    }
+    debug_log("  session_id validation: OK");
+
+    let claude_bin = get_claude_path()
+        .ok_or_else(|| {
+            debug_log("  ERROR: Claude CLI not found");
+            "Claude CLI not found".to_string()
+        })?;
+    debug_log(&format!("  claude_bin: {}", claude_bin));
+
+    let args = vec![
+        "-p",
+        "--output-format", "json",
+        "--max-turns", "1",
+        "--dangerously-skip-permissions",
+        "--no-session-persistence",
+        "--resume", session_id,
+        "--fork-session",
+    ];
+    debug_log(&format!("  args: {:?}", args));
+
+    let summary_prompt = format!(
+        "Summarize the current session context needed to perform the following scheduled task. \
+         Task instruction: \"{}\"\n\n\
+         Include the following in the summary:\n\
+         - Current project/file information being worked on\n\
+         - Status of work in progress\n\
+         - Key information needed to perform the scheduled task\n\n\
+         Keep it concise.",
+        schedule_prompt
+    );
+    debug_log(&format!("  summary_prompt len: {} chars", summary_prompt.len()));
+
+    debug_log("  Spawning Claude process...");
+    let spawn_start = std::time::Instant::now();
+    let mut child = Command::new(&claude_bin)
+        .args(&args)
+        .current_dir(working_dir)
+        .env_remove("CLAUDECODE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            debug_log(&format!("  ERROR: Failed to spawn: {}", e));
+            format!("Failed to start Claude for context summary: {}", e)
+        })?;
+    debug_log(&format!("  Process spawned in {:?}, pid={:?}", spawn_start.elapsed(), child.id()));
+
+    if let Some(mut stdin) = child.stdin.take() {
+        debug_log("  Writing summary_prompt to stdin...");
+        let write_result = stdin.write_all(summary_prompt.as_bytes());
+        debug_log(&format!("  stdin write result: {:?}", write_result.is_ok()));
+        drop(stdin);
+        debug_log("  stdin dropped (closed)");
+    } else {
+        debug_log("  WARNING: Could not get stdin handle");
+    }
+
+    debug_log("  Waiting for process to complete (wait_with_output)...");
+    let wait_start = std::time::Instant::now();
+    let output = child.wait_with_output()
+        .map_err(|e| {
+            debug_log(&format!("  ERROR: wait_with_output failed after {:?}: {}", wait_start.elapsed(), e));
+            format!("Failed to read context summary output: {}", e)
+        })?;
+    debug_log(&format!("  Process completed in {:?}", wait_start.elapsed()));
+    debug_log(&format!("  exit status: {:?}", output.status));
+    debug_log(&format!("  stdout len: {} bytes", output.stdout.len()));
+    debug_log(&format!("  stderr len: {} bytes", output.stderr.len()));
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        debug_log(&format!("  ERROR: Process failed. exit_code={:?}", output.status.code()));
+        debug_log(&format!("  stderr: {}", &stderr[..stderr.len().min(500)]));
+        debug_log(&format!("  stdout: {}", &stdout[..stdout.len().min(500)]));
+        return Err(format!("Context summary process failed (exit {:?}). stderr: {}",
+            output.status.code(), stderr));
+    }
+    debug_log("  Process exit status: success");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stdout_preview: String = stdout.chars().take(300).collect();
+    debug_log(&format!("  stdout preview: {}", stdout_preview));
+
+    let resp = parse_claude_output(&stdout);
+    debug_log(&format!("  parse_claude_output: success={}, response_len={:?}",
+        resp.success, resp.response.as_ref().map(|s| s.len())));
+
+    let result = resp.response
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            debug_log(&format!("  ERROR: Empty response. stderr: {}", &stderr[..stderr.len().min(500)]));
+            format!("Context summary extraction returned empty. stderr: {}", stderr)
+        });
+
+    match &result {
+        Ok(summary) => {
+            let preview: String = summary.chars().take(200).collect();
+            debug_log(&format!("  SUCCESS: summary preview: {}", preview));
+        }
+        Err(e) => {
+            debug_log(&format!("  FAILED: {}", e));
+        }
+    }
+    debug_log("=== extract_context_summary END ===");
+    result
+}
+
+/// Resume an existing session to extract a result summary (no tools, max 1 turn).
+/// Used after cron execution to summarize results for the next run's context.
+pub fn extract_result_summary(session_id: &str, working_dir: &str, model: Option<&str>) -> Result<String, String> {
+    debug_log("=== extract_result_summary START ===");
+    debug_log(&format!("  session_id: {}", session_id));
+    debug_log(&format!("  working_dir: {}", working_dir));
+    debug_log(&format!("  model: {:?}", model));
+
+    if !is_valid_session_id(session_id) {
+        debug_log("  ERROR: Invalid session ID format");
+        return Err("Invalid session ID format".to_string());
+    }
+    let claude_bin = get_claude_path()
+        .ok_or_else(|| {
+            debug_log("  ERROR: Claude CLI not found");
+            "Claude CLI not found".to_string()
+        })?;
+    debug_log(&format!("  claude_bin: {}", claude_bin));
+
+    let mut args = vec![
+        "-p",
+        "--output-format", "json",
+        "--max-turns", "1",
+        "--dangerously-skip-permissions",
+        "--no-session-persistence",
+        "--resume", session_id,
+    ];
+
+    let model_str;
+    if let Some(m) = model {
+        model_str = m.to_string();
+        args.push("--model");
+        args.push(&model_str);
+    }
+    debug_log(&format!("  args: {:?}", args));
+
+    let summary_prompt = "Summarize the results of the task just performed. \
+        Provide key information concisely so it can be used as context for the next execution.";
+
+    debug_log("  Spawning Claude process...");
+    let spawn_start = std::time::Instant::now();
+    let mut child = Command::new(claude_bin)
+        .args(&args)
+        .current_dir(working_dir)
+        .env_remove("CLAUDECODE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            debug_log(&format!("  ERROR: Failed to spawn: {}", e));
+            format!("Failed to start Claude for result summary: {}", e)
+        })?;
+    debug_log(&format!("  Process spawned in {:?}, pid={:?}", spawn_start.elapsed(), child.id()));
+
+    if let Some(mut stdin) = child.stdin.take() {
+        debug_log("  Writing summary_prompt to stdin...");
+        let write_result = stdin.write_all(summary_prompt.as_bytes());
+        debug_log(&format!("  stdin write result: {:?}", write_result.is_ok()));
+        drop(stdin);
+        debug_log("  stdin dropped (closed)");
+    } else {
+        debug_log("  WARNING: Could not get stdin handle");
+    }
+
+    debug_log("  Waiting for process to complete...");
+    let wait_start = std::time::Instant::now();
+    let output = child.wait_with_output()
+        .map_err(|e| {
+            debug_log(&format!("  ERROR: wait_with_output failed after {:?}: {}", wait_start.elapsed(), e));
+            format!("Failed to read result summary output: {}", e)
+        })?;
+    debug_log(&format!("  Process completed in {:?}", wait_start.elapsed()));
+    debug_log(&format!("  exit status: {:?}", output.status));
+    debug_log(&format!("  stdout len: {} bytes", output.stdout.len()));
+    debug_log(&format!("  stderr len: {} bytes", output.stderr.len()));
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        debug_log(&format!("  ERROR: Process failed. exit_code={:?}", output.status.code()));
+        debug_log(&format!("  stderr: {}", &stderr[..stderr.len().min(500)]));
+        debug_log(&format!("  stdout: {}", &stdout[..stdout.len().min(500)]));
+        return Err(format!("Result summary process failed (exit {:?}). stderr: {}",
+            output.status.code(), stderr));
+    }
+    debug_log("  Process exit status: success");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stdout_preview: String = stdout.chars().take(300).collect();
+    debug_log(&format!("  stdout preview: {}", stdout_preview));
+
+    let resp = parse_claude_output(&stdout);
+    debug_log(&format!("  parse_claude_output: success={}, response_len={:?}",
+        resp.success, resp.response.as_ref().map(|s| s.len())));
+
+    let result = resp.response
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            debug_log(&format!("  ERROR: Empty response. stderr: {}", &stderr[..stderr.len().min(500)]));
+            format!("Result summary extraction returned empty. stderr: {}", stderr)
+        });
+
+    match &result {
+        Ok(summary) => {
+            let preview: String = summary.chars().take(200).collect();
+            debug_log(&format!("  SUCCESS: summary preview: {}", preview));
+        }
+        Err(e) => {
+            debug_log(&format!("  FAILED: {}", e));
+        }
+    }
+    debug_log("=== extract_result_summary END ===");
+    result
+}
+
 /// Check if Claude CLI is available
 pub fn is_claude_available() -> bool {
     #[cfg(not(unix))]
@@ -328,6 +603,8 @@ pub fn execute_command_streaming(
     system_prompt: Option<&str>,
     allowed_tools: Option<&[String]>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
+    model: Option<&str>,
+    no_session_persistence: bool,
 ) -> Result<(), String> {
     debug_log("========================================");
     debug_log("=== execute_command_streaming START ===");
@@ -390,6 +667,17 @@ IMPORTANT: Format your responses using Markdown for better readability:
     if let Some(sp) = effective_prompt {
         args.push("--append-system-prompt".to_string());
         args.push(sp.to_string());
+    }
+
+    // Set model if specified
+    if let Some(m) = model {
+        args.push("--model".to_string());
+        args.push(m.to_string());
+    }
+
+    // Disable session persistence (prevents Claude from saving session to ~/.claude/sessions/)
+    if no_session_persistence {
+        args.push("--no-session-persistence".to_string());
     }
 
     // Resume session if available

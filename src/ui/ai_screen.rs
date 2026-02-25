@@ -15,17 +15,13 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 
-use std::sync::OnceLock;
 use crate::utils::format::safe_truncate;
 use crate::keybindings::{AIScreenAction, Keybindings};
 
-/// Debug logging helper (only active when COKACDIR_DEBUG=1)
+/// Debug logging helper (active when /debug toggled ON or COKACDIR_DEBUG=1)
 fn debug_log(msg: &str) {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let enabled = ENABLED.get_or_init(|| {
-        std::env::var("COKACDIR_DEBUG").map(|v| v == "1").unwrap_or(false)
-    });
-    if !*enabled { return; }
+    use std::sync::atomic::Ordering;
+    if !crate::services::claude::DEBUG_ENABLED.load(Ordering::Relaxed) { return; }
     if let Some(home) = dirs::home_dir() {
         let debug_dir = home.join(".cokacdir").join("debug");
         let _ = std::fs::create_dir_all(&debug_dir);
@@ -904,6 +900,8 @@ Keep responses concise and terminal-friendly.",
                 None,
                 None,
                 None,
+                None,
+                false,
             );
 
             let elapsed = start_time.elapsed();

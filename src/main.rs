@@ -43,8 +43,15 @@ fn print_help() {
     println!("    --ccserver <TOKEN>...   Start Telegram bot server(s)");
     println!("    --sendfile <PATH> --chat <ID> --key <HASH>");
     println!("                            Send file via Telegram bot (internal use, HASH = token hash)");
-    println!("    --ismcptool <TOOL>...    Check if MCP tool(s) are registered in .claude/settings.json (CWD)");
-    println!("    --addmcptool <TOOL>...   Add MCP tool permission(s) to .claude/settings.json (CWD)");
+    println!("    --currenttime            Print current server time");
+    println!("    --cron <PROMPT> --at <TIME> --chat <ID> --key <HASH> [--once] [--session <SID>]");
+    println!("                            Register a scheduled task");
+    println!("    --cron-list --chat <ID> --key <HASH>");
+    println!("                            List registered schedules");
+    println!("    --cron-remove <SID> --chat <ID> --key <HASH>");
+    println!("                            Remove a schedule");
+    println!("    --cron-update <SID> --at <TIME> --chat <ID> --key <HASH>");
+    println!("                            Update schedule time");
     println!();
     println!("HOMEPAGE: https://cokacdir.cokac.com");
 }
@@ -70,14 +77,14 @@ fn handle_sendfile(path: &str, chat_id: i64, hash_key: &str) {
 
     let file_path = std::path::Path::new(path);
     if !file_path.exists() {
-        eprintln!("Error: file not found: {}", path);
+        eprintln!("{}", serde_json::json!({"status":"error","message":format!("file not found: {}", path)}));
         std::process::exit(1);
     }
 
     let abs_path = match file_path.canonicalize() {
         Ok(p) => p.to_string_lossy().to_string(),
         Err(e) => {
-            eprintln!("Error: failed to resolve path: {}", e);
+            eprintln!("{}", serde_json::json!({"status":"error","message":format!("failed to resolve path: {}", e)}));
             std::process::exit(1);
         }
     };
@@ -86,12 +93,12 @@ fn handle_sendfile(path: &str, chat_id: i64, hash_key: &str) {
     let queue_dir = match dirs::home_dir() {
         Some(h) => h.join(".cokacdir").join("upload_queue"),
         None => {
-            eprintln!("Error: cannot determine home directory");
+            eprintln!("{}", serde_json::json!({"status":"error","message":"cannot determine home directory"}));
             std::process::exit(1);
         }
     };
     if let Err(e) = std::fs::create_dir_all(&queue_dir) {
-        eprintln!("Error: failed to create queue directory: {}", e);
+        eprintln!("{}", serde_json::json!({"status":"error","message":format!("failed to create queue directory: {}", e)}));
         std::process::exit(1);
     }
 
@@ -110,90 +117,302 @@ fn handle_sendfile(path: &str, chat_id: i64, hash_key: &str) {
     });
     let queue_path = queue_dir.join(&filename);
     match std::fs::write(&queue_path, queue_content.to_string()) {
-        Ok(_) => println!("Queued for upload: {}", abs_path),
+        Ok(_) => println!("{}", serde_json::json!({"status":"ok","path":abs_path})),
         Err(e) => {
-            eprintln!("Error: failed to write queue file: {}", e);
+            eprintln!("{}", serde_json::json!({"status":"error","message":format!("failed to write queue file: {}", e)}));
             std::process::exit(1);
         }
     }
 }
 
-fn handle_ismcptool(tool_names: &[String]) {
-    let cwd = std::env::current_dir().expect("Cannot determine current directory");
-    let settings_path = cwd.join(".claude").join("settings.json");
+fn cron_debug(msg: &str) {
+    claude::debug_log_to("cron.log", msg);
+}
 
-    let allow_list: Vec<String> = if settings_path.exists() {
-        let content = std::fs::read_to_string(&settings_path)
-            .expect("Failed to read .claude/settings.json");
-        let json: serde_json::Value = serde_json::from_str(&content)
-            .expect("Failed to parse .claude/settings.json");
-        json.get("permissions")
-            .and_then(|p| p.get("allow"))
-            .and_then(|a| a.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-            .unwrap_or_default()
+fn handle_cron_register(prompt: &str, at_value: &str, chat_id: i64, hash_key: &str, once: bool, session_id: Option<&str>) {
+    use services::telegram;
+    use services::claude;
+
+    cron_debug("========================================");
+    cron_debug("=== handle_cron_register START ===");
+    cron_debug("========================================");
+    cron_debug(&format!("  prompt: {}", prompt));
+    cron_debug(&format!("  at_value: {}", at_value));
+    cron_debug(&format!("  chat_id: {}", chat_id));
+    cron_debug(&format!("  hash_key: {}", hash_key));
+    cron_debug(&format!("  once: {}", once));
+    cron_debug(&format!("  session_id: {:?}", session_id));
+
+    let now = chrono::Local::now();
+    cron_debug(&format!("  now: {}", now.format("%Y-%m-%d %H:%M:%S%.3f")));
+
+    // Determine schedule_type and schedule value
+    cron_debug("  Parsing --at value...");
+    let (schedule_type, schedule_value) = if let Some(dt) = telegram::parse_relative_time_pub(at_value) {
+        // Relative time → convert to absolute
+        cron_debug(&format!("  Parsed as relative time → absolute: {}", dt.format("%Y-%m-%d %H:%M:%S")));
+        ("absolute".to_string(), dt.format("%Y-%m-%d %H:%M:%S").to_string())
+    } else if at_value.split_whitespace().count() == 5 {
+        // Cron expression (5 fields)
+        cron_debug(&format!("  Parsed as cron expression: {}", at_value));
+        ("cron".to_string(), at_value.to_string())
     } else {
-        Vec::new()
+        // Try absolute time: "YYYY-MM-DD HH:MM:SS"
+        if chrono::NaiveDateTime::parse_from_str(at_value, "%Y-%m-%d %H:%M:%S").is_ok() {
+            cron_debug(&format!("  Parsed as absolute time: {}", at_value));
+            ("absolute".to_string(), at_value.to_string())
+        } else {
+            cron_debug(&format!("  ERROR: invalid --at value: {}", at_value));
+            eprintln!("{}", serde_json::json!({"status":"error","message":format!("invalid --at value: {}", at_value)}));
+            std::process::exit(1);
+        }
+    };
+    cron_debug(&format!("  schedule_type={}, schedule_value={}", schedule_type, schedule_value));
+
+    // Generate 8-char uppercase hex ID (0-9, A-F), unique among existing schedule files
+    cron_debug("  Generating unique ID...");
+    let id = {
+        use std::collections::HashSet;
+        let existing: HashSet<String> = telegram::list_all_schedule_ids_pub();
+        cron_debug(&format!("  Existing schedule IDs: {:?}", existing));
+        loop {
+            let candidate = format!("{:08X}", rand::random::<u32>());
+            if !existing.contains(&candidate) {
+                cron_debug(&format!("  Generated ID: {}", candidate));
+                break candidate;
+            }
+            cron_debug(&format!("  ID collision: {}, retrying...", candidate));
+        }
     };
 
-    for tool_name in tool_names {
-        if allow_list.iter().any(|v| v == tool_name) {
-            println!("{}: registered", tool_name);
-        } else {
-            println!("{}: not registered", tool_name);
+    // Resolve current_path from bot_settings using chat_id + hash_key
+    cron_debug("  Resolving current_path...");
+    let current_path = telegram::resolve_current_path_for_chat(chat_id, hash_key)
+        .unwrap_or_else(|| {
+            let fallback = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "/".to_string());
+            cron_debug(&format!("  current_path fallback: {}", fallback));
+            fallback
+        });
+    cron_debug(&format!("  current_path: {}", current_path));
+
+    // Step 1: Register schedule immediately (without context_summary) and output result
+    cron_debug("  Writing schedule entry (without context_summary)...");
+    telegram::write_schedule_entry_pub(&telegram::ScheduleEntryData {
+        id: id.clone(),
+        chat_id,
+        bot_key: hash_key.to_string(),
+        current_path: current_path.clone(),
+        prompt: prompt.to_string(),
+        schedule: schedule_value.clone(),
+        schedule_type: schedule_type.clone(),
+        once,
+        last_run: None,
+        created_at: now.format("%Y-%m-%d %H:%M:%S").to_string(),
+        context_summary: None,
+    }).unwrap_or_else(|e| {
+        cron_debug(&format!("  ERROR: write_schedule_entry failed: {}", e));
+        eprintln!("{}", serde_json::json!({"status":"error","message":format!("{}", e)}));
+        std::process::exit(1);
+    });
+    cron_debug("  Schedule entry written successfully");
+
+    let output = serde_json::json!({
+        "status": "ok",
+        "id": id,
+        "prompt": prompt,
+        "schedule": schedule_value,
+    });
+    cron_debug(&format!("  Output: {}", output));
+    // Write result to temp file so the bot can read it even if Bash tool misses stdout
+    if let Some(home) = dirs::home_dir() {
+        let result_path = home.join(".cokacdir").join("schedule").join(format!("{}.result", id));
+        let _ = std::fs::write(&result_path, output.to_string());
+        cron_debug(&format!("  Result file written: {}", result_path.display()));
+    }
+    println!("{}", output);
+    // Flush stdout immediately so the Bash tool captures the output
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+
+    // Step 2: Spawn a detached child process to extract context summary and update the schedule
+    if let Some(sid) = session_id {
+        cron_debug(&format!("  Spawning background process for context summary extraction: session={}", sid));
+        let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("cokacdir"));
+        let child = std::process::Command::new(exe)
+            .arg("--cron-context")
+            .arg(&id)
+            .arg(sid)
+            .arg(prompt)
+            .arg(&current_path)
+            .arg(chat_id.to_string())
+            .arg(hash_key)
+            .arg(&schedule_value)
+            .arg(&schedule_type)
+            .arg(if once { "1" } else { "0" })
+            .arg(now.format("%Y-%m-%d %H:%M:%S").to_string())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match child {
+            Ok(c) => cron_debug(&format!("  Background process spawned: pid={:?}", c.id())),
+            Err(e) => cron_debug(&format!("  WARNING: Failed to spawn background process: {}", e)),
         }
+    } else {
+        cron_debug("  No session_id provided, skipping context summary");
+    }
+
+    cron_debug("=== handle_cron_register END ===");
+}
+
+struct CronContextArgs {
+    id: String,
+    session_id: String,
+    prompt: String,
+    current_path: String,
+    chat_id: i64,
+    hash_key: String,
+    schedule: String,
+    schedule_type: String,
+    once: bool,
+    created_at: String,
+}
+
+impl CronContextArgs {
+    fn from_args(args: &[String]) -> Option<Self> {
+        if args.len() < 10 {
+            return None;
+        }
+        Some(Self {
+            id: args[0].clone(),
+            session_id: args[1].clone(),
+            prompt: args[2].clone(),
+            current_path: args[3].clone(),
+            chat_id: args[4].parse().unwrap_or(0),
+            hash_key: args[5].clone(),
+            schedule: args[6].clone(),
+            schedule_type: args[7].clone(),
+            once: args[8] == "1",
+            created_at: args[9].clone(),
+        })
     }
 }
 
-fn handle_addmcptool(tool_names: &[String]) {
-    let cwd = std::env::current_dir().expect("Cannot determine current directory");
-    let settings_path = cwd.join(".claude").join("settings.json");
+/// Background process: extract context summary and update a schedule entry.
+/// Called as: cokacdir --cron-context <id> <session_id> <prompt> <current_path> <chat_id> <hash_key> <schedule> <schedule_type> <once> <created_at>
+fn handle_cron_context(args: &[String]) {
+    use services::telegram;
+    use services::claude;
 
-    // Read existing file or start with empty object
-    let mut json: serde_json::Value = if settings_path.exists() {
-        let content = std::fs::read_to_string(&settings_path)
-            .expect("Failed to read .claude/settings.json");
-        serde_json::from_str(&content)
-            .expect("Failed to parse .claude/settings.json")
-    } else {
-        let _ = std::fs::create_dir_all(settings_path.parent().unwrap());
-        serde_json::json!({})
+    cron_debug("=== handle_cron_context START ===");
+    let ctx = match CronContextArgs::from_args(args) {
+        Some(c) => c,
+        None => {
+            cron_debug(&format!("  ERROR: insufficient args: {:?}", args));
+            return;
+        }
     };
 
-    let obj = json.as_object_mut().expect("settings.json is not a JSON object");
+    cron_debug(&format!("  id={}, session_id={}, prompt_len={}", ctx.id, ctx.session_id, ctx.prompt.len()));
 
-    // Add tool to permissions.allow array
-    let permissions = obj.entry("permissions")
-        .or_insert_with(|| serde_json::json!({}));
-    let allow = permissions.as_object_mut()
-        .expect("permissions is not an object")
-        .entry("allow")
-        .or_insert_with(|| serde_json::json!([]));
-    let allow_arr = allow.as_array_mut().expect("allow is not an array");
-
-    // Add each tool, skipping duplicates
-    let mut added = Vec::new();
-    let mut skipped = Vec::new();
-    for tool_name in tool_names {
-        let already_exists = allow_arr.iter().any(|v| v.as_str() == Some(tool_name.as_str()));
-        if already_exists {
-            skipped.push(tool_name.as_str());
-        } else {
-            allow_arr.push(serde_json::json!(tool_name));
-            added.push(tool_name.as_str());
+    let extract_start = std::time::Instant::now();
+    match claude::extract_context_summary(&ctx.session_id, &ctx.prompt, &ctx.current_path) {
+        Ok(summary) => {
+            cron_debug(&format!("  Context summary extracted in {:?}, len={}", extract_start.elapsed(), summary.len()));
+            telegram::write_schedule_entry_pub(&telegram::ScheduleEntryData {
+                id: ctx.id.clone(),
+                chat_id: ctx.chat_id,
+                bot_key: ctx.hash_key.clone(),
+                current_path: ctx.current_path.clone(),
+                prompt: ctx.prompt.clone(),
+                schedule: ctx.schedule.clone(),
+                schedule_type: ctx.schedule_type.clone(),
+                once: ctx.once,
+                last_run: None,
+                created_at: ctx.created_at.clone(),
+                context_summary: Some(summary),
+            }).unwrap_or_else(|e| {
+                cron_debug(&format!("  ERROR: write_schedule_entry failed: {}", e));
+            });
+            cron_debug("  Schedule entry updated with context_summary");
+        }
+        Err(e) => {
+            cron_debug(&format!("  WARNING: extract_context_summary failed in {:?}: {}", extract_start.elapsed(), e));
         }
     }
+    cron_debug("=== handle_cron_context END ===");
+}
 
-    // Save
-    let content = serde_json::to_string_pretty(&json).expect("Failed to serialize JSON");
-    std::fs::write(&settings_path, content).expect("Failed to write .claude/settings.json");
+fn handle_cron_list(chat_id: i64, hash_key: &str) {
+    use services::telegram;
 
-    for name in &added {
-        println!("Added: {}", name);
+    let entries = telegram::list_schedule_entries_pub(hash_key, Some(chat_id));
+    let items: Vec<serde_json::Value> = entries.iter().map(|e| {
+        serde_json::json!({
+            "id": e.id,
+            "prompt": e.prompt,
+            "schedule": e.schedule,
+            "created_at": e.created_at
+        })
+    }).collect();
+    println!("{}", serde_json::json!({"status":"ok","schedules":items}));
+}
+
+fn handle_cron_remove(id: &str, chat_id: i64, hash_key: &str) {
+    use services::telegram;
+
+    // Verify ownership
+    let entries = telegram::list_schedule_entries_pub(hash_key, Some(chat_id));
+    if !entries.iter().any(|e| e.id == id) {
+        eprintln!("{}", serde_json::json!({"status":"error","message":format!("schedule not found or access denied: {}", id)}));
+        std::process::exit(1);
     }
-    for name in &skipped {
-        println!("Already registered: {}", name);
+
+    if telegram::delete_schedule_entry_pub(id) {
+        println!("{}", serde_json::json!({"status":"ok","id":id}));
+    } else {
+        eprintln!("{}", serde_json::json!({"status":"error","message":format!("failed to remove schedule: {}", id)}));
+        std::process::exit(1);
     }
+}
+
+fn handle_cron_update(id: &str, at_value: &str, chat_id: i64, hash_key: &str) {
+    use services::telegram;
+
+    // Find the entry
+    let entries = telegram::list_schedule_entries_pub(hash_key, Some(chat_id));
+    let entry = entries.iter().find(|e| e.id == id);
+    let Some(entry) = entry else {
+        eprintln!("{}", serde_json::json!({"status":"error","message":format!("schedule not found or access denied: {}", id)}));
+        std::process::exit(1);
+    };
+
+    // Parse new schedule value
+    let (schedule_type, schedule_value) = if let Some(dt) = telegram::parse_relative_time_pub(at_value) {
+        ("absolute".to_string(), dt.format("%Y-%m-%d %H:%M:%S").to_string())
+    } else if at_value.split_whitespace().count() == 5 {
+        ("cron".to_string(), at_value.to_string())
+    } else if chrono::NaiveDateTime::parse_from_str(at_value, "%Y-%m-%d %H:%M:%S").is_ok() {
+        ("absolute".to_string(), at_value.to_string())
+    } else {
+        eprintln!("{}", serde_json::json!({"status":"error","message":format!("invalid --at value: {}", at_value)}));
+        std::process::exit(1);
+    };
+
+    // Update and write back
+    let mut updated = entry.clone();
+    updated.schedule = schedule_value.clone();
+    updated.schedule_type = schedule_type.clone();
+    updated.last_run = None; // Reset last_run so it triggers again
+
+    telegram::write_schedule_entry_pub(&updated).unwrap_or_else(|e| {
+        eprintln!("{}", serde_json::json!({"status":"error","message":format!("{}", e)}));
+        std::process::exit(1);
+    });
+
+    println!("{}", serde_json::json!({"status":"ok","id":id,"schedule":schedule_value}));
 }
 
 fn print_version() {
@@ -249,7 +468,7 @@ fn handle_prompt(prompt: &str) {
     let current_dir = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".to_string());
-    let response = claude::execute_command(prompt, None, &current_dir, None);
+    let response = claude::execute_command(prompt, None, &current_dir, None, None);
 
     if !response.success {
         eprintln!("Error: {}", response.error.unwrap_or_else(|| "Unknown error".to_string()));
@@ -308,6 +527,9 @@ fn normalize_consecutive_empty_lines(text: &str) -> String {
 }
 
 fn main() -> io::Result<()> {
+    // Initialize debug flag from environment variable
+    claude::init_debug_from_env();
+
     // Handle command line arguments
     let args: Vec<String> = env::args().collect();
     let mut design_mode = false;
@@ -353,6 +575,155 @@ fn main() -> io::Result<()> {
                 handle_ccserver(tokens);
                 return Ok(());
             }
+            "--currenttime" => {
+                println!("{}", serde_json::json!({"status":"ok","time":chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()}));
+                return Ok(());
+            }
+            "--cron" => {
+                cron_debug("=== --cron argument parsing START ===");
+                cron_debug(&format!("  Raw args: {:?}", &args[i..]));
+                // Parse: --cron "prompt" --at "time" --chat ID --key KEY [--once] [--session SID]
+                let mut prompt: Option<String> = None;
+                let mut at_value: Option<String> = None;
+                let mut chat_id: Option<i64> = None;
+                let mut key: Option<String> = None;
+                let mut once = false;
+                let mut session_id: Option<String> = None;
+                let mut j = i + 1;
+                while j < args.len() {
+                    match args[j].as_str() {
+                        "--at" => {
+                            if j + 1 < args.len() { at_value = Some(args[j + 1].clone()); j += 2; }
+                            else { j += 1; }
+                        }
+                        "--chat" => {
+                            if j + 1 < args.len() { chat_id = args[j + 1].parse().ok(); j += 2; }
+                            else { j += 1; }
+                        }
+                        "--key" => {
+                            if j + 1 < args.len() { key = Some(args[j + 1].clone()); j += 2; }
+                            else { j += 1; }
+                        }
+                        "--session" => {
+                            if j + 1 < args.len() { session_id = Some(args[j + 1].clone()); j += 2; }
+                            else { j += 1; }
+                        }
+                        "--once" => { once = true; j += 1; }
+                        _ if prompt.is_none() && !args[j].starts_with("--") => {
+                            prompt = Some(args[j].clone()); j += 1;
+                        }
+                        _ => { j += 1; }
+                    }
+                }
+                cron_debug(&format!("  Parsed: prompt={:?}, at={:?}, chat_id={:?}, key={:?}, once={}, session_id={:?}",
+                    prompt, at_value, chat_id, key, once, session_id));
+                match (prompt, at_value, chat_id, key) {
+                    (Some(p), Some(at), Some(cid), Some(k)) => {
+                        cron_debug("  All required args present, calling handle_cron_register");
+                        handle_cron_register(&p, &at, cid, &k, once, session_id.as_deref());
+                    }
+                    _ => {
+                        cron_debug("  ERROR: Missing required arguments");
+                        eprintln!("{}", serde_json::json!({"status":"error","message":"--cron requires \"prompt\", --at \"time\", --chat <ID>, --key <HASH>"}));
+                    }
+                }
+                cron_debug("=== --cron argument parsing END ===");
+                return Ok(());
+            }
+            "--cron-context" => {
+                // Background process: extract context summary and update schedule
+                let remaining: Vec<String> = args[i+1..].to_vec();
+                handle_cron_context(&remaining);
+                return Ok(());
+            }
+            "--cron-list" => {
+                let mut chat_id: Option<i64> = None;
+                let mut key: Option<String> = None;
+                let mut j = i + 1;
+                while j < args.len() {
+                    match args[j].as_str() {
+                        "--chat" => {
+                            if j + 1 < args.len() { chat_id = args[j + 1].parse().ok(); j += 2; }
+                            else { j += 1; }
+                        }
+                        "--key" => {
+                            if j + 1 < args.len() { key = Some(args[j + 1].clone()); j += 2; }
+                            else { j += 1; }
+                        }
+                        _ => { j += 1; }
+                    }
+                }
+                match (chat_id, key) {
+                    (Some(cid), Some(k)) => handle_cron_list(cid, &k),
+                    _ => {
+                        eprintln!("{}", serde_json::json!({"status":"error","message":"--cron-list requires --chat <ID> --key <HASH>"}));
+                    }
+                }
+                return Ok(());
+            }
+            "--cron-remove" => {
+                let mut sched_id: Option<String> = None;
+                let mut chat_id: Option<i64> = None;
+                let mut key: Option<String> = None;
+                let mut j = i + 1;
+                while j < args.len() {
+                    match args[j].as_str() {
+                        "--chat" => {
+                            if j + 1 < args.len() { chat_id = args[j + 1].parse().ok(); j += 2; }
+                            else { j += 1; }
+                        }
+                        "--key" => {
+                            if j + 1 < args.len() { key = Some(args[j + 1].clone()); j += 2; }
+                            else { j += 1; }
+                        }
+                        _ if sched_id.is_none() && !args[j].starts_with("--") => {
+                            sched_id = Some(args[j].clone()); j += 1;
+                        }
+                        _ => { j += 1; }
+                    }
+                }
+                match (sched_id, chat_id, key) {
+                    (Some(sid), Some(cid), Some(k)) => handle_cron_remove(&sid, cid, &k),
+                    _ => {
+                        eprintln!("{}", serde_json::json!({"status":"error","message":"--cron-remove requires <ID> --chat <ID> --key <HASH>"}));
+                    }
+                }
+                return Ok(());
+            }
+            "--cron-update" => {
+                let mut sched_id: Option<String> = None;
+                let mut at_value: Option<String> = None;
+                let mut chat_id: Option<i64> = None;
+                let mut key: Option<String> = None;
+                let mut j = i + 1;
+                while j < args.len() {
+                    match args[j].as_str() {
+                        "--at" => {
+                            if j + 1 < args.len() { at_value = Some(args[j + 1].clone()); j += 2; }
+                            else { j += 1; }
+                        }
+                        "--chat" => {
+                            if j + 1 < args.len() { chat_id = args[j + 1].parse().ok(); j += 2; }
+                            else { j += 1; }
+                        }
+                        "--key" => {
+                            if j + 1 < args.len() { key = Some(args[j + 1].clone()); j += 2; }
+                            else { j += 1; }
+                        }
+                        _ if sched_id.is_none() && !args[j].starts_with("--") => {
+                            sched_id = Some(args[j].clone()); j += 1;
+                        }
+                        _ => { j += 1; }
+                    }
+                }
+                match (sched_id, at_value, chat_id, key) {
+                    (Some(sid), Some(at), Some(cid), Some(k)) => handle_cron_update(&sid, &at, cid, &k),
+                    _ => {
+                        eprintln!("{}", serde_json::json!({"status":"error","message":"--cron-update requires <ID> --at \"time\" --chat <ID> --key <HASH>"}));
+                    }
+                }
+                return Ok(());
+            }
             "--sendfile" => {
                 // Parse: --sendfile <PATH> --chat <ID> --key <TOKEN>
                 let mut file_path: Option<String> = None;
@@ -389,36 +760,9 @@ fn main() -> io::Result<()> {
                         handle_sendfile(&fp, cid, &k);
                     }
                     _ => {
-                        eprintln!("Error: --sendfile requires <PATH>, --chat <ID>, and --key <HASH>");
-                        eprintln!("Usage: cokacdir --sendfile <PATH> --chat <ID> --key <HASH>");
+                        eprintln!("{}", serde_json::json!({"status":"error","message":"--sendfile requires <PATH>, --chat <ID>, and --key <HASH>"}));
                     }
                 }
-                return Ok(());
-            }
-            "--ismcptool" => {
-                let tool_names: Vec<String> = args[i + 1..].iter()
-                    .take_while(|a| !a.starts_with('-'))
-                    .cloned()
-                    .collect();
-                if tool_names.is_empty() {
-                    eprintln!("Error: --ismcptool requires at least one tool name");
-                    eprintln!("Usage: cokacdir --ismcptool \"TOOL1\" \"TOOL2\" ...");
-                    return Ok(());
-                }
-                handle_ismcptool(&tool_names);
-                return Ok(());
-            }
-            "--addmcptool" => {
-                let tool_names: Vec<String> = args[i + 1..].iter()
-                    .take_while(|a| !a.starts_with('-'))
-                    .cloned()
-                    .collect();
-                if tool_names.is_empty() {
-                    eprintln!("Error: --addmcptool requires at least one tool name");
-                    eprintln!("Usage: cokacdir --addmcptool \"TOOL1\" \"TOOL2\" ...");
-                    return Ok(());
-                }
-                handle_addmcptool(&tool_names);
                 return Ok(());
             }
             "--design" => {
