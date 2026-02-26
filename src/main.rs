@@ -140,7 +140,7 @@ fn handle_cron_register(prompt: &str, at_value: &str, chat_id: i64, hash_key: &s
     cron_debug(&format!("  at_value: {}", at_value));
     cron_debug(&format!("  chat_id: {}", chat_id));
     cron_debug(&format!("  hash_key: {}", hash_key));
-    cron_debug(&format!("  once: {}", once));
+    cron_debug(&format!("  once(raw): {}", once));
     cron_debug(&format!("  session_id: {:?}", session_id));
 
     let now = chrono::Local::now();
@@ -207,7 +207,7 @@ fn handle_cron_register(prompt: &str, at_value: &str, chat_id: i64, hash_key: &s
         prompt: prompt.to_string(),
         schedule: schedule_value.clone(),
         schedule_type: schedule_type.clone(),
-        once,
+        once: if schedule_type == "cron" { Some(once) } else { None },
         last_run: None,
         created_at: now.format("%Y-%m-%d %H:%M:%S").to_string(),
         context_summary: None,
@@ -218,12 +218,16 @@ fn handle_cron_register(prompt: &str, at_value: &str, chat_id: i64, hash_key: &s
     });
     cron_debug("  Schedule entry written successfully");
 
-    let output = serde_json::json!({
+    let mut output = serde_json::json!({
         "status": "ok",
         "id": id,
         "prompt": prompt,
         "schedule": schedule_value,
+        "schedule_type": schedule_type,
     });
+    if schedule_type == "cron" {
+        output.as_object_mut().unwrap().insert("once".to_string(), serde_json::json!(once));
+    }
     cron_debug(&format!("  Output: {}", output));
     // Write result to temp file so the bot can read it even if Bash tool misses stdout
     if let Some(home) = dirs::home_dir() {
@@ -340,7 +344,7 @@ fn handle_cron_context(args: &[String]) {
                 prompt: ctx.prompt.clone(),
                 schedule: ctx.schedule.clone(),
                 schedule_type: ctx.schedule_type.clone(),
-                once: ctx.once,
+                once: if ctx.schedule_type == "cron" { Some(ctx.once) } else { None },
                 last_run: None,
                 created_at: ctx.created_at.clone(),
                 context_summary: Some(summary),
@@ -363,12 +367,17 @@ fn handle_cron_list(chat_id: i64, hash_key: &str) {
     let entries = telegram::list_schedule_entries_pub(hash_key, Some(chat_id));
     cron_debug(&format!("[handle_cron_list] found {} entries", entries.len()));
     let items: Vec<serde_json::Value> = entries.iter().map(|e| {
-        serde_json::json!({
+        let mut obj = serde_json::json!({
             "id": e.id,
             "prompt": e.prompt,
             "schedule": e.schedule,
+            "schedule_type": e.schedule_type,
             "created_at": e.created_at
-        })
+        });
+        if let Some(once_val) = e.once {
+            obj.as_object_mut().unwrap().insert("once".to_string(), serde_json::json!(once_val));
+        }
+        obj
     }).collect();
     println!("{}", serde_json::json!({"status":"ok","schedules":items}));
 }
@@ -429,6 +438,12 @@ fn handle_cron_update(id: &str, at_value: &str, chat_id: i64, hash_key: &str) {
     updated.schedule = schedule_value.clone();
     updated.schedule_type = schedule_type.clone();
     updated.last_run = None; // Reset last_run so it triggers again
+    // once is only meaningful for cron; clear it for absolute
+    if schedule_type == "absolute" {
+        updated.once = None;
+    } else if updated.once.is_none() {
+        updated.once = Some(false);
+    }
 
     cron_debug(&format!("[handle_cron_update] id={}, writing: type={}, schedule={}, last_run=None", id, schedule_type, schedule_value));
     telegram::write_schedule_entry_pub(&updated).unwrap_or_else(|e| {

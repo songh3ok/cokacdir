@@ -116,7 +116,7 @@ struct ScheduleEntry {
     prompt: String,
     schedule: String,         // original --at value (cron expression or absolute time)
     schedule_type: String,    // "absolute" | "cron"
-    once: bool,
+    once: Option<bool>,       // only meaningful for cron (None for absolute)
     last_run: Option<String>, // "2026-02-23 14:00:00"
     created_at: String,
     context_summary: Option<String>, // context summary text for session-isolated schedule
@@ -158,7 +158,7 @@ fn read_schedule_entry(path: &std::path::Path) -> Option<ScheduleEntry> {
         prompt: v.get("prompt")?.as_str()?.to_string(),
         schedule: v.get("schedule")?.as_str()?.to_string(),
         schedule_type: v.get("schedule_type")?.as_str()?.to_string(),
-        once: v.get("once").and_then(|v| v.as_bool()).unwrap_or(false),
+        once: v.get("once").and_then(|v| v.as_bool()),
         last_run: v.get("last_run").and_then(|v| v.as_str()).map(String::from),
         created_at: v.get("created_at")?.as_str()?.to_string(),
         context_summary: v.get("context_summary").and_then(|v| v.as_str()).map(String::from),
@@ -174,11 +174,11 @@ fn read_schedule_entry(path: &std::path::Path) -> Option<ScheduleEntry> {
 
 /// Write a schedule entry to its JSON file
 fn write_schedule_entry(entry: &ScheduleEntry) -> Result<(), String> {
-    sched_debug(&format!("[write_schedule_entry] id={}, type={}, schedule={}, once={}, last_run={:?}",
+    sched_debug(&format!("[write_schedule_entry] id={}, type={}, schedule={}, once={:?}, last_run={:?}",
         entry.id, entry.schedule_type, entry.schedule, entry.once, entry.last_run));
     let dir = schedule_dir().ok_or("Cannot determine home directory")?;
     fs::create_dir_all(&dir).map_err(|e| format!("Failed to create schedule dir: {e}"))?;
-    let json = serde_json::json!({
+    let mut json = serde_json::json!({
         "id": entry.id,
         "chat_id": entry.chat_id,
         "bot_key": entry.bot_key,
@@ -186,11 +186,13 @@ fn write_schedule_entry(entry: &ScheduleEntry) -> Result<(), String> {
         "prompt": entry.prompt,
         "schedule": entry.schedule,
         "schedule_type": entry.schedule_type,
-        "once": entry.once,
         "last_run": entry.last_run,
         "created_at": entry.created_at,
         "context_summary": entry.context_summary,
     });
+    if let Some(once_val) = entry.once {
+        json.as_object_mut().unwrap().insert("once".to_string(), serde_json::json!(once_val));
+    }
     let path = dir.join(format!("{}.json", entry.id));
     let tmp_path = dir.join(format!("{}.json.tmp", entry.id));
     sched_debug(&format!("[write_schedule_entry] writing tmp: {}", tmp_path.display()));
@@ -239,6 +241,14 @@ fn delete_schedule_entry(id: &str) -> bool {
     let existed = path.exists();
     let ok = fs::remove_file(&path).is_ok();
     sched_debug(&format!("[delete_schedule_entry] path={}, existed={}, removed={}", path.display(), existed, ok));
+
+    // Also remove the .result file if it exists
+    let result_path = dir.join(format!("{id}.result"));
+    if result_path.exists() {
+        let _ = fs::remove_file(&result_path);
+        sched_debug(&format!("[delete_schedule_entry] also removed .result: {}", result_path.display()));
+    }
+
     ok
 }
 
@@ -371,7 +381,7 @@ pub struct ScheduleEntryData {
     pub prompt: String,
     pub schedule: String,
     pub schedule_type: String,
-    pub once: bool,
+    pub once: Option<bool>,       // only meaningful for cron (None for absolute)
     pub last_run: Option<String>,
     pub created_at: String,
     pub context_summary: Option<String>,
@@ -497,10 +507,14 @@ fn build_system_prompt(role: &str, current_path: &str, chat_id: i64, bot_key: &s
          • Output: {{\"status\":\"ok\",\"time\":\"2026-02-25 14:30:00\"}}\n\n\
          ── SCHEDULE: REGISTER ──\n\
          cokacdir --cron \"<PROMPT>\" --at \"<TIME>\" --chat {chat_id} --key {bot_key} [--once] [--session <SESSION_ID>]\n\
-         • --at formats:\n\
-           - \"2026-02-25 18:00:00\" or \"30m\", \"4h\", \"1d\" → one-time (auto-deleted after execution)\n\
-           - \"0 * * * *\" (5-field cron) → recurring\n\
-         • --once: cron only — run once at the next match then auto-delete\n\
+         • Three schedule types:\n\
+           1. ABSOLUTE (one-time): --at \"2026-02-25 18:00:00\" or --at \"30m\"/\"4h\"/\"1d\"\n\
+              Runs once at the specified time, then auto-deleted.\n\
+           2. CRON ONE-TIME: --at \"0 9 * * 1\" --once\n\
+              Cron expression + --once flag. Runs once at the next cron match, then auto-deleted.\n\
+           3. CRON RECURRING: --at \"0 9 * * 1\"\n\
+              Cron expression without --once. Runs repeatedly on every match.\n\
+         • --once: cron only — makes a cron schedule run once then auto-delete\n\
          • --session <SID>: pass ONLY when the task continues the current conversation context\n\
          • PROMPT rules:\n\
            1. Write as an imperative INSTRUCTION for another AI, not conversational text\n\
@@ -3458,7 +3472,14 @@ fn format_cokacdir_result(cmd: &str, content: &str) -> String {
             let id = v.get("id").and_then(|s| s.as_str()).unwrap_or("?");
             let prompt = v.get("prompt").and_then(|s| s.as_str()).unwrap_or("");
             let schedule = v.get("schedule").and_then(|s| s.as_str()).unwrap_or("");
-            let kind = if schedule.split_whitespace().count() == 5 { "cron" } else { "once" };
+            let schedule_type = v.get("schedule_type").and_then(|s| s.as_str()).unwrap_or("");
+            let once = v.get("once").and_then(|b| b.as_bool()).unwrap_or(false);
+            let kind = match schedule_type {
+                "absolute" => "1회",
+                "cron" if once => "1회 cron",
+                "cron" => "반복",
+                _ => if schedule.split_whitespace().count() == 5 { "반복" } else { "1회" },
+            };
             format!("✅ Scheduled [{}]\n🔖 {}\n📝 {}\n🕐 `{}`", kind, id, prompt, schedule)
         }
         "cron-list" => {
@@ -3471,12 +3492,20 @@ fn format_cokacdir_result(cmd: &str, content: &str) -> String {
                         let id = s.get("id").and_then(|v| v.as_str()).unwrap_or("?");
                         let schedule = s.get("schedule").and_then(|v| v.as_str()).unwrap_or("");
                         let prompt = s.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+                        let schedule_type = s.get("schedule_type").and_then(|v| v.as_str()).unwrap_or("");
+                        let once = s.get("once").and_then(|b| b.as_bool()).unwrap_or(false);
+                        let kind = match schedule_type {
+                            "absolute" => "1회",
+                            "cron" if once => "1회 cron",
+                            "cron" => "반복",
+                            _ => if schedule.split_whitespace().count() == 5 { "반복" } else { "1회" },
+                        };
                         let prompt_preview = if prompt.chars().count() > 40 {
                             format!("{}...", prompt.chars().take(40).collect::<String>())
                         } else {
                             prompt.to_string()
                         };
-                        lines.push(format!("\n{}. {}\n   🕐 `{}`\n   🔖 {}", i + 1, prompt_preview, schedule, id));
+                        lines.push(format!("\n{}. [{}] {}\n   🕐 `{}`\n   🔖 {}", i + 1, kind, prompt_preview, schedule, id));
                     }
                     lines.join("\n")
                 }
@@ -3742,7 +3771,7 @@ fn should_trigger(entry: &ScheduleEntry) -> bool {
 /// Update schedule entry after a run: set last_run, delete if once
 fn update_schedule_after_run(entry: &ScheduleEntry, new_context_summary: Option<String>) {
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    sched_debug(&format!("[update_schedule_after_run] id={}, type={}, once={}, now={}, has_new_context={}",
+    sched_debug(&format!("[update_schedule_after_run] id={}, type={}, once={:?}, now={}, has_new_context={}",
         entry.id, entry.schedule_type, entry.once, now, new_context_summary.is_some()));
 
     // 실행 중 사용자가 삭제한 경우 부활 방지
@@ -3759,30 +3788,19 @@ fn update_schedule_after_run(entry: &ScheduleEntry, new_context_summary: Option<
         return; // 이미 삭제됨 - write하지 않음
     }
 
-    if entry.once || entry.schedule_type == "absolute" {
-        sched_debug(&format!("[update_schedule_after_run] id={}, once/absolute → write last_run then delete", entry.id));
-        // Set last_run first to prevent re-trigger if delete fails
-        let mut updated = entry.clone();
-        updated.last_run = Some(now.clone());
-        if let Err(e) = write_schedule_entry(&updated) {
-            sched_debug(&format!("[update_schedule_after_run] id={}, write before delete failed: {}", entry.id, e));
-            eprintln!("[Schedule] Failed to write entry {} before delete: {}", entry.id, e);
-        }
-        let deleted = delete_schedule_entry(&entry.id);
-        sched_debug(&format!("[update_schedule_after_run] id={}, delete result={}", entry.id, deleted));
+    // One-time schedules (absolute / cron --once) are already deleted before execution,
+    // so this function only handles recurring cron updates.
+    sched_debug(&format!("[update_schedule_after_run] id={}, cron recurring → update last_run", entry.id));
+    let mut updated = entry.clone();
+    updated.last_run = Some(now);
+    if new_context_summary.is_some() {
+        updated.context_summary = new_context_summary;
+    }
+    if let Err(e) = write_schedule_entry(&updated) {
+        sched_debug(&format!("[update_schedule_after_run] id={}, write failed: {}", entry.id, e));
+        eprintln!("[Schedule] Failed to update entry {}: {}", entry.id, e);
     } else {
-        sched_debug(&format!("[update_schedule_after_run] id={}, cron recurring → update last_run", entry.id));
-        let mut updated = entry.clone();
-        updated.last_run = Some(now);
-        if new_context_summary.is_some() {
-            updated.context_summary = new_context_summary;
-        }
-        if let Err(e) = write_schedule_entry(&updated) {
-            sched_debug(&format!("[update_schedule_after_run] id={}, write failed: {}", entry.id, e));
-            eprintln!("[Schedule] Failed to update entry {}: {}", entry.id, e);
-        } else {
-            sched_debug(&format!("[update_schedule_after_run] id={}, updated successfully", entry.id));
-        }
+        sched_debug(&format!("[update_schedule_after_run] id={}, updated successfully", entry.id));
     }
 }
 
@@ -3810,6 +3828,13 @@ async fn execute_schedule(
     };
     let project_path = entry.current_path.clone();
     let schedule_id = entry.id.clone();
+
+    // Delete schedule files before execution for one-time schedules (absolute / cron --once)
+    if entry.once.unwrap_or(false) || entry.schedule_type == "absolute" {
+        sched_debug(&format!("[execute_schedule] id={}, one-time → deleting schedule files before execution", schedule_id));
+        delete_schedule_entry(&schedule_id);
+    }
+
     let ts = chrono::Local::now().format("%H:%M:%S");
     println!("  [{ts}] ⏰ Schedule Starting: {user_prompt}");
 
@@ -4167,9 +4192,9 @@ async fn execute_schedule(
 
         // For cron entries with context_summary, extract result summary for next run
         // Skip if execution was cancelled or encountered an error
-        sched_debug(&format!("[execute_schedule] id={}, checking context summary: cancelled={}, had_error={}, type={}, once={}, has_context={}",
+        sched_debug(&format!("[execute_schedule] id={}, checking context summary: cancelled={}, had_error={}, type={}, once={:?}, has_context={}",
             schedule_id, cancelled, had_error, entry_clone.schedule_type, entry_clone.once, entry_clone.context_summary.is_some()));
-        let new_context_summary = if !cancelled && !had_error && entry_clone.schedule_type == "cron" && !entry_clone.once && entry_clone.context_summary.is_some() {
+        let new_context_summary = if !cancelled && !had_error && entry_clone.schedule_type == "cron" && !entry_clone.once.unwrap_or(false) && entry_clone.context_summary.is_some() {
             sched_debug(&format!("[execute_schedule] id={}, extracting result summary", schedule_id));
             if let Some(ref sid) = exec_session_id {
                 let sid = sid.clone();
