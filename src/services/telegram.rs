@@ -1118,7 +1118,20 @@ async fn handle_message(
                     } else {
                         "claude"
                     };
-                    let existing = load_existing_session(&last_path, auto_provider);
+                    let existing = load_existing_session(&last_path, auto_provider)
+                        .or_else(|| {
+                            let provider = if auto_provider == "codex" {
+                                SessionProvider::Codex
+                            } else {
+                                SessionProvider::Claude
+                            };
+                            if let Some(info) = find_latest_session_by_cwd(&last_path, provider) {
+                                convert_and_save_session(&info, &last_path);
+                                load_existing_session(&last_path, auto_provider)
+                            } else {
+                                None
+                            }
+                        });
                     let session = data.sessions.entry(chat_id).or_insert_with(|| ChatSession {
                         session_id: None,
                         current_path: None,
