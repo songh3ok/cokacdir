@@ -365,7 +365,7 @@ fn transfer_rsync(
             let mut byte_buf = [0u8; 1];
             loop {
                 if cancel_flag.load(Ordering::Relaxed) {
-                    let _ = child.kill();
+                    crate::services::claude::kill_child_tree(&mut child);
                     let _ = child.wait();
                     if let Some(ref path) = askpass_script { cleanup_askpass_script(path); }
                     return Ok(());

@@ -174,6 +174,23 @@ impl CancelToken {
     }
 }
 
+/// Kill a child process and its entire process tree.
+/// On Unix, uses SIGKILL. On Windows, uses `taskkill /PID /T /F` to kill the
+/// process tree so that child processes (bash.exe, node.exe, etc.) don't survive.
+pub fn kill_child_tree(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    {
+        let pid = child.id();
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = child.kill();
+    }
+}
+
 /// Cached regex pattern for session ID validation
 fn session_id_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
@@ -770,6 +787,12 @@ IMPORTANT: Format your responses using Markdown for better readability:
     // Store child PID in cancel token so the caller can kill it externally
     if let Some(ref token) = cancel_token {
         *token.child_pid.lock().unwrap() = Some(child.id());
+        // If /stop arrived before PID was stored, kill immediately
+        if token.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            kill_child_tree(&mut child);
+            let _ = child.wait();
+            return Ok(());
+        }
     }
 
     // Write prompt to stdin
@@ -805,7 +828,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
         if let Some(ref token) = cancel_token {
             if token.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
                 debug_log("Cancel detected — killing child process");
-                let _ = child.kill();
+                kill_child_tree(&mut child);
                 let _ = child.wait();
                 return Ok(());
             }
@@ -918,7 +941,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
     if let Some(ref token) = cancel_token {
         if token.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
             debug_log("Cancel detected after loop — killing child process");
-            let _ = child.kill();
+            kill_child_tree(&mut child);
             let _ = child.wait();
             return Ok(());
         }

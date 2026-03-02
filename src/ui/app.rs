@@ -5062,7 +5062,7 @@ impl App {
                         loop {
                             // Check for cancellation
                             if cancel_flag.load(Ordering::Relaxed) {
-                                let _ = child.kill();
+                                crate::services::claude::kill_child_tree(&mut child);
                                 // Cleanup partial archive on cancellation
                                 cleanup_archive(&archive_path_clone);
                                 let _ = tx.send(ProgressMessage::Error(
@@ -5434,7 +5434,7 @@ impl App {
                         loop {
                             // Check for cancellation
                             if cancel_flag.load(Ordering::Relaxed) {
-                                let _ = child.kill();
+                                crate::services::claude::kill_child_tree(&mut child);
                                 cleanup_extract_dir(&extract_path_clone);
                                 let _ = tx.send(ProgressMessage::Error(
                                     extract_dir_owned.clone(),

@@ -77,6 +77,8 @@ struct BotSettings {
     models: HashMap<String, String>,
     /// Debug logging toggle
     debug: bool,
+    /// chat_id (string) → true if silent mode enabled
+    silent: HashMap<String, bool>,
 }
 
 impl Default for BotSettings {
@@ -88,6 +90,7 @@ impl Default for BotSettings {
             as_public_for_group_chat: HashMap::new(),
             models: HashMap::new(),
             debug: false,
+            silent: HashMap::new(),
         }
     }
 }
@@ -112,6 +115,11 @@ fn get_model(settings: &BotSettings, chat_id: ChatId) -> Option<String> {
             _ => m.clone(),
         }
     })
+}
+
+/// Check if silent mode is enabled for a chat (default: ON)
+fn is_silent(settings: &BotSettings, chat_id: ChatId) -> bool {
+    settings.silent.get(&chat_id.0.to_string()).copied().unwrap_or(true)
 }
 
 /// Schedule entry persisted as JSON in ~/.cokacdir/schedule/
@@ -558,6 +566,50 @@ fn build_system_prompt(role: &str, current_path: &str, chat_id: i64, bot_key: &s
     )
 }
 
+/// Returns additional system prompt instructions specific to Codex models.
+/// Includes apply_patch guidance (always) and Windows Git Bash notice (conditional).
+fn codex_extra_instructions() -> String {
+    let mut extra = String::from(
+        "\n\n\
+         ═══════════════════════════════════════\n\
+         FILE EDITING POLICY\n\
+         ═══════════════════════════════════════\n\
+         When creating, modifying, or deleting files, you MUST use the functions.apply_patch tool \
+         instead of functions.shell_command.\n\
+         Do NOT use shell commands (echo, cat, sed, tee, printf, etc.) to write or edit files.\n\
+         functions.apply_patch is safer, produces cleaner diffs, and avoids encoding/escaping issues.\n\
+         Reserve functions.shell_command for non-file-editing tasks such as running programs, \
+         searching, testing, and invoking external CLIs.",
+    );
+
+    if cfg!(target_os = "windows") {
+        let paths = [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ];
+        if let Some(bash_path) = paths.iter().find(|p| std::path::Path::new(p).exists()) {
+            extra.push_str(&format!(
+                "\n\n\
+                 ═══════════════════════════════════════\n\
+                 WINDOWS SHELL EXECUTION\n\
+                 ═══════════════════════════════════════\n\
+                 This system is running on Windows. Git Bash is available.\n\
+                 When using the functions.shell_command tool, you MUST execute commands through Git Bash:\n\
+                 \"{bash_path}\" -lc \"<your linux command here>\"\n\n\
+                 Examples:\n\
+                 \"{bash_path}\" -lc \"ls -la /path/to/dir\"\n\
+                 \"{bash_path}\" -lc \"grep -r 'pattern' ./src\"\n\
+                 \"{bash_path}\" -lc \"cat file.txt | head -20\"\n\n\
+                 Always use this method instead of running commands directly via cmd.exe or PowerShell.\n\
+                 This allows you to use Linux-style commands (ls, grep, find, cat, sed, awk, etc.) on Windows.",
+                bash_path = bash_path,
+            ));
+        }
+    }
+
+    extra
+}
+
 /// Check if a newer version is available by fetching Cargo.toml from GitHub.
 /// Returns a notice string if an update is available, None otherwise.
 async fn check_latest_version(current: &str) -> Option<String> {
@@ -698,7 +750,14 @@ fn load_bot_settings(token: &str) -> BotSettings {
 
     let debug = entry.get("debug").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    BotSettings { allowed_tools, last_sessions, owner_user_id, as_public_for_group_chat, models, debug }
+    let silent: HashMap<String, bool> = entry.get("silent")
+        .and_then(|v| v.as_object())
+        .map(|obj| obj.iter()
+            .filter_map(|(k, v)| v.as_bool().map(|b| (k.clone(), b)))
+            .collect())
+        .unwrap_or_default();
+
+    BotSettings { allowed_tools, last_sessions, owner_user_id, as_public_for_group_chat, models, debug, silent }
 }
 
 /// Save bot settings to bot_settings.json
@@ -722,6 +781,7 @@ fn save_bot_settings(token: &str, settings: &BotSettings) {
         "as_public_for_group_chat": settings.as_public_for_group_chat,
         "models": settings.models,
         "debug": settings.debug,
+        "silent": settings.silent,
     });
     if let Some(owner_id) = settings.owner_user_id {
         entry["owner_user_id"] = serde_json::json!(owner_id);
@@ -818,6 +878,7 @@ pub async fn run_bot(token: &str) {
         teloxide::types::BotCommand::new("setpollingtime", "Set API polling interval (ms)"),
         teloxide::types::BotCommand::new("model", "Set AI model"),
         teloxide::types::BotCommand::new("debug", "Toggle debug logging"),
+        teloxide::types::BotCommand::new("silent", "Toggle silent mode (hide tool calls)"),
     ];
     if let Err(e) = tg!("set_my_commands", bot.set_my_commands(commands).await) {
         println!("  ⚠ Failed to set bot commands: {e}");
@@ -1107,6 +1168,9 @@ async fn handle_message(
     } else if text.starts_with("/debug") {
         println!("  [{timestamp}] ◀ [{user_name}] /debug");
         handle_debug_command(&bot, chat_id, &state, token).await?;
+    } else if text.starts_with("/silent") {
+        println!("  [{timestamp}] ◀ [{user_name}] /silent");
+        handle_silent_command(&bot, chat_id, &state, token).await?;
     } else if text.starts_with("/allowed") {
         println!("  [{timestamp}] ◀ [{user_name}] /allowed {}", text.strip_prefix("/allowed").unwrap_or("").trim());
         handle_allowed_command(&bot, chat_id, &text, &state, token).await?;
@@ -1186,6 +1250,7 @@ Ask in natural language to manage schedules.
   Too low may cause Telegram API rate limits.
   Minimum 2500ms, recommended 3000ms+.
 <code>/debug</code> — Toggle debug logging
+<code>/silent</code> — Toggle silent mode (hide tool calls)
 
 <code>/help</code> — Show this help";
 
@@ -2088,7 +2153,7 @@ async fn handle_clear_command(
                 #[cfg(unix)]
                 unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
                 #[cfg(windows)]
-                { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).output(); }
+                { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output(); }
             }
         }
     }
@@ -2207,7 +2272,7 @@ async fn handle_stop_command(
                         libc::kill(pid as libc::pid_t, libc::SIGTERM);
                     }
                     #[cfg(windows)]
-                    { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).output(); }
+                    { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output(); }
                 }
             }
 
@@ -2491,7 +2556,7 @@ async fn handle_shell_command(
             use std::io::BufRead;
             for line in std::io::BufReader::new(stdout).lines().flatten() {
                 if cancel_token_clone.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-                    let _ = child.kill();
+                    claude::kill_child_tree(&mut child);
                     let _ = child.wait();
                     return;
                 }
@@ -2683,7 +2748,7 @@ async fn handle_shell_command(
                         libc::kill(pid as libc::pid_t, libc::SIGTERM);
                     }
                     #[cfg(windows)]
-                    { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).output(); }
+                    { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output(); }
                 }
             }
 
@@ -2861,6 +2926,27 @@ async fn handle_debug_command(
     Ok(())
 }
 
+/// Handle /silent command - toggle silent mode per chat (hide tool calls)
+async fn handle_silent_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    state: &SharedState,
+    token: &str,
+) -> ResponseResult<()> {
+    let next = {
+        let mut data = state.lock().await;
+        let key = chat_id.0.to_string();
+        let prev = data.settings.silent.get(&key).copied().unwrap_or(true);
+        let next = !prev;
+        data.settings.silent.insert(key, next);
+        save_bot_settings(token, &data.settings);
+        next
+    };
+    let status = if next { "🔇 Silent mode: ON" } else { "🔊 Silent mode: OFF" };
+    shared_rate_limit_wait(state, chat_id).await;
+    tg!("send_message", bot.send_message(chat_id, status).await)?;
+    Ok(())
+}
 
 /// Handle /allowed command - add/remove tools
 /// Usage: /allowed +toolname  (add)
@@ -3291,6 +3377,7 @@ async fn handle_text_message(
                 conv.push_str(&context_prompt);
                 conv
             };
+            let codex_system_prompt = format!("{}{}", system_prompt_owned, codex_extra_instructions());
             msg_debug(&format!("[handle_text_message] → codex::execute, codex_model={:?}, codex_prompt_len={}",
                 codex_model, codex_prompt.len()));
             codex::execute_command_streaming(
@@ -3298,7 +3385,7 @@ async fn handle_text_message(
                 session_id_clone.as_deref(),
                 &current_path_clone,
                 tx.clone(),
-                Some(&system_prompt_owned),
+                Some(&codex_system_prompt),
                 Some(&allowed_tools),
                 Some(cancel_token_clone),
                 codex_model,
@@ -3354,13 +3441,12 @@ async fn handle_text_message(
         let mut cancelled = false;
         let mut new_session_id: Option<String> = None;
         let mut spin_idx: usize = 0;
-        let mut pending_cokacdir_cmd: Option<String> = None;
+        let mut pending_cokacdir = false;
         let mut last_tool_name: String = String::new();
 
-
-        let polling_time_ms = {
+        let (polling_time_ms, silent_mode) = {
             let data = state_owned.lock().await;
-            data.polling_time_ms
+            (data.polling_time_ms, is_silent(&data.settings, chat_id))
         };
         let mut queue_done = false;
         let mut response_rendered = false;
@@ -3397,12 +3483,12 @@ async fn handle_text_message(
                                     full_response.push_str(&content);
                                 }
                                 StreamMessage::ToolUse { name, input } => {
-                                    pending_cokacdir_cmd = detect_cokacdir_command(&name, &input);
+                                    pending_cokacdir = detect_cokacdir_command(&name, &input);
                                     last_tool_name = name.clone();
                                     let summary = format_tool_input(&name, &input);
                                     let ts = chrono::Local::now().format("%H:%M:%S");
                                     println!("  [{ts}]   ⚙ {name}: {summary}");
-                                    if pending_cokacdir_cmd.is_none() {
+                                    if !pending_cokacdir && !silent_mode {
                                         if name == "Bash" {
                                             full_response.push_str(&format!("\n\n```\n{}\n```\n", format_bash_command(&input)));
                                         } else {
@@ -3411,10 +3497,10 @@ async fn handle_text_message(
                                     }
                                 }
                                 StreamMessage::ToolResult { content, is_error } => {
-                                    if let Some(cmd) = pending_cokacdir_cmd.take() {
+                                    if std::mem::take(&mut pending_cokacdir) {
                                         let ts = chrono::Local::now().format("%H:%M:%S");
-                                        println!("  [{ts}]   ↩ cokacdir --{cmd}: {content}");
-                                        let formatted = format_cokacdir_result(&cmd, &content);
+                                        println!("  [{ts}]   ↩ cokacdir: {content}");
+                                        let formatted = format_cokacdir_result(&content);
                                         if !formatted.is_empty() {
                                             full_response.push_str(&format!("\n{}\n", formatted));
                                         }
@@ -3427,14 +3513,16 @@ async fn handle_text_message(
                                         } else {
                                             full_response.push_str(&format!("\n❌ `{}`\n\n", truncated));
                                         }
-                                    } else if last_tool_name == "Read" {
-                                        full_response.push_str(&format!("\n✅ `{} bytes`\n\n", content.len()));
-                                    } else if !content.is_empty() {
-                                        let truncated = truncate_str(&content, 300);
-                                        if truncated.contains('\n') {
-                                            full_response.push_str(&format!("\n```\n{}\n```\n", truncated));
-                                        } else {
-                                            full_response.push_str(&format!("\n✅ `{}`\n\n", truncated));
+                                    } else if !silent_mode {
+                                        if last_tool_name == "Read" {
+                                            full_response.push_str(&format!("\n✅ `{} bytes`\n\n", content.len()));
+                                        } else if !content.is_empty() {
+                                            let truncated = truncate_str(&content, 300);
+                                            if truncated.contains('\n') {
+                                                full_response.push_str(&format!("\n```\n{}\n```\n", truncated));
+                                            } else {
+                                                full_response.push_str(&format!("\n✅ `{}`\n\n", truncated));
+                                            }
                                         }
                                     }
                                 }
@@ -3620,7 +3708,7 @@ async fn handle_text_message(
                         libc::kill(pid as libc::pid_t, libc::SIGTERM);
                     }
                     #[cfg(windows)]
-                    { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).output(); }
+                    { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output(); }
                 }
             }
 
@@ -4231,41 +4319,20 @@ fn find_closing_single(chars: &[char], start: usize, marker: char) -> Option<usi
 }
 
 /// Check if a Bash tool call is an internal cokacdir command.
-/// Returns the subcommand name (e.g. "cron", "cron-list", "currenttime", "sendfile") or None.
-fn detect_cokacdir_command(name: &str, input: &str) -> Option<String> {
-    if name != "Bash" { return None; }
-    let v: serde_json::Value = serde_json::from_str(input).ok()?;
+/// Scans whitespace-delimited tokens for one whose basename matches the cokacdir binary.
+/// Handles quoted paths, shell wrappers (bash -lc "..."), chained commands (cd && ...), etc.
+fn detect_cokacdir_command(name: &str, input: &str) -> bool {
+    if name != "Bash" { return false; }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(input) else { return false };
     let cmd = v.get("command").and_then(|v| v.as_str()).unwrap_or("");
-    let trimmed = cmd.trim_start();
-    // Match "cokacdir", "cokacdir.exe", or full path ending with cokacdir/cokacdir.exe
-    // Handle quoted paths (e.g. "/path with spaces/cokacdir" --sendfile ...)
-    let (first_token, rest) = if trimmed.starts_with('"') {
-        match trimmed[1..].find('"') {
-            Some(end) => (&trimmed[1..end + 1], trimmed[end + 2..].trim_start()),
-            None => return None,
-        }
-    } else if trimmed.starts_with('\'') {
-        match trimmed[1..].find('\'') {
-            Some(end) => (&trimmed[1..end + 1], trimmed[end + 2..].trim_start()),
-            None => return None,
-        }
-    } else {
-        let token = trimmed.split_whitespace().next().unwrap_or("");
-        (token, trimmed[token.len()..].trim_start())
-    };
-    // Support both backslash and forward-slash paths for basename extraction
-    let basename = first_token.rsplit(['/', '\\']).next().unwrap_or("");
-    let expected_basename = crate::bin_path().rsplit(['/', '\\']).next().unwrap_or("");
-    if basename != expected_basename {
-        return None;
-    }
-    // Extract the first --xxx flag after the executable name
-    for token in rest.split_whitespace() {
-        if let Some(flag) = token.strip_prefix("--") {
-            return Some(flag.to_string());
-        }
-    }
-    Some("unknown".to_string())
+    let expected = crate::bin_path().rsplit(['/', '\\']).next().unwrap_or("");
+    if expected.is_empty() { return false; }
+    // Strip surrounding quotes from each token, then compare basename
+    cmd.split_whitespace().any(|tok| {
+        let unquoted = tok.trim_matches(|c| c == '"' || c == '\'');
+        let basename = unquoted.rsplit(['/', '\\']).next().unwrap_or("");
+        basename == expected
+    })
 }
 
 /// Read the most recent .result file from schedule dir and delete it
@@ -4282,10 +4349,11 @@ fn read_latest_cron_result() -> Option<String> {
     Some(content)
 }
 
-/// Format a cokacdir command's JSON result into a human-readable message
-fn format_cokacdir_result(cmd: &str, content: &str) -> String {
-    // Try to parse as JSON; if empty and cmd is "cron", try reading from .result file
-    let effective_content = if content.trim().is_empty() && cmd == "cron" {
+/// Format a cokacdir command's JSON result into a human-readable message.
+/// Auto-detects the subcommand from JSON result fields.
+fn format_cokacdir_result(content: &str) -> String {
+    // Try to parse as JSON; if empty, try reading from .result file (for --cron)
+    let effective_content = if content.trim().is_empty() {
         read_latest_cron_result().unwrap_or_default()
     } else {
         content.to_string()
@@ -4302,69 +4370,70 @@ fn format_cokacdir_result(cmd: &str, content: &str) -> String {
         return format!("❌ {}", msg);
     }
 
-    match cmd {
-        "currenttime" => {
-            let time = v.get("time").and_then(|s| s.as_str()).unwrap_or("?");
-            format!("🕐 {}", time)
-        }
-        "cron" => {
-            let id = v.get("id").and_then(|s| s.as_str()).unwrap_or("?");
-            let prompt = v.get("prompt").and_then(|s| s.as_str()).unwrap_or("");
-            let schedule = v.get("schedule").and_then(|s| s.as_str()).unwrap_or("");
-            let schedule_type = v.get("schedule_type").and_then(|s| s.as_str()).unwrap_or("");
-            let once = v.get("once").and_then(|b| b.as_bool()).unwrap_or(false);
-            let kind = match schedule_type {
-                "absolute" => "1회",
-                "cron" if once => "1회 cron",
-                "cron" => "반복",
-                _ => if schedule.split_whitespace().count() == 5 { "반복" } else { "1회" },
-            };
-            format!("✅ Scheduled [{}]\n🔖 {}\n📝 {}\n🕐 `{}`", kind, id, prompt, schedule)
-        }
-        "cron-list" => {
-            let schedules = v.get("schedules").and_then(|a| a.as_array());
-            match schedules {
-                Some(arr) if arr.is_empty() => "📋 No schedules found.".to_string(),
-                Some(arr) => {
-                    let mut lines = vec![format!("📋 {} schedule(s)", arr.len())];
-                    for (i, s) in arr.iter().enumerate() {
-                        let id = s.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-                        let schedule = s.get("schedule").and_then(|v| v.as_str()).unwrap_or("");
-                        let prompt = s.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-                        let schedule_type = s.get("schedule_type").and_then(|v| v.as_str()).unwrap_or("");
-                        let once = s.get("once").and_then(|b| b.as_bool()).unwrap_or(false);
-                        let kind = match schedule_type {
-                            "absolute" => "1회",
-                            "cron" if once => "1회 cron",
-                            "cron" => "반복",
-                            _ => if schedule.split_whitespace().count() == 5 { "반복" } else { "1회" },
-                        };
-                        let prompt_preview = if prompt.chars().count() > 40 {
-                            format!("{}...", prompt.chars().take(40).collect::<String>())
-                        } else {
-                            prompt.to_string()
-                        };
-                        lines.push(format!("\n{}. [{}] {}\n   🕐 `{}`\n   🔖 {}", i + 1, kind, prompt_preview, schedule, id));
-                    }
-                    lines.join("\n")
+    // Auto-detect subcommand from result JSON fields
+    if v.get("time").is_some() {
+        // --currenttime → {"status":"ok","time":"..."}
+        let time = v["time"].as_str().unwrap_or("?");
+        format!("🕐 {}", time)
+    } else if v.get("schedules").is_some() {
+        // --cron-list → {"status":"ok","schedules":[...]}
+        let schedules = v["schedules"].as_array();
+        match schedules {
+            Some(arr) if arr.is_empty() => "📋 No schedules found.".to_string(),
+            Some(arr) => {
+                let mut lines = vec![format!("📋 {} schedule(s)", arr.len())];
+                for (i, s) in arr.iter().enumerate() {
+                    let id = s.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                    let schedule = s.get("schedule").and_then(|v| v.as_str()).unwrap_or("");
+                    let prompt = s.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+                    let schedule_type = s.get("schedule_type").and_then(|v| v.as_str()).unwrap_or("");
+                    let once = s.get("once").and_then(|b| b.as_bool()).unwrap_or(false);
+                    let kind = match schedule_type {
+                        "absolute" => "1회",
+                        "cron" if once => "1회 cron",
+                        "cron" => "반복",
+                        _ => if schedule.split_whitespace().count() == 5 { "반복" } else { "1회" },
+                    };
+                    let prompt_preview = if prompt.chars().count() > 40 {
+                        format!("{}...", prompt.chars().take(40).collect::<String>())
+                    } else {
+                        prompt.to_string()
+                    };
+                    lines.push(format!("\n{}. [{}] {}\n   🕐 `{}`\n   🔖 {}", i + 1, kind, prompt_preview, schedule, id));
                 }
-                None => content.to_string(),
+                lines.join("\n")
             }
+            None => content.to_string(),
         }
-        "cron-remove" => {
-            let id = v.get("id").and_then(|s| s.as_str()).unwrap_or("?");
-            format!("✅ Removed\n🔖 {}", id)
-        }
-        "cron-update" => {
-            let id = v.get("id").and_then(|s| s.as_str()).unwrap_or("?");
-            let schedule = v.get("schedule").and_then(|s| s.as_str()).unwrap_or("");
-            format!("✅ Updated\n🕐 `{}`\n🔖 {}", schedule, id)
-        }
-        "sendfile" => {
-            let path = v.get("path").and_then(|s| s.as_str()).unwrap_or("?");
-            format!("📎 {}", path)
-        }
-        _ => content.to_string(),
+    } else if v.get("path").is_some() {
+        // --sendfile → {"status":"ok","path":"..."}
+        let path = v["path"].as_str().unwrap_or("?");
+        format!("📎 {}", path)
+    } else if v.get("prompt").is_some() {
+        // --cron (register) → {"status":"ok","id":"...","prompt":"...","schedule":"..."}
+        let id = v.get("id").and_then(|s| s.as_str()).unwrap_or("?");
+        let prompt = v["prompt"].as_str().unwrap_or("");
+        let schedule = v.get("schedule").and_then(|s| s.as_str()).unwrap_or("");
+        let schedule_type = v.get("schedule_type").and_then(|s| s.as_str()).unwrap_or("");
+        let once = v.get("once").and_then(|b| b.as_bool()).unwrap_or(false);
+        let kind = match schedule_type {
+            "absolute" => "1회",
+            "cron" if once => "1회 cron",
+            "cron" => "반복",
+            _ => if schedule.split_whitespace().count() == 5 { "반복" } else { "1회" },
+        };
+        format!("✅ Scheduled [{}]\n🔖 {}\n📝 {}\n🕐 `{}`", kind, id, prompt, schedule)
+    } else if v.get("schedule").is_some() {
+        // --cron-update → {"status":"ok","id":"...","schedule":"..."}
+        let id = v.get("id").and_then(|s| s.as_str()).unwrap_or("?");
+        let schedule = v["schedule"].as_str().unwrap_or("");
+        format!("✅ Updated\n🕐 `{}`\n🔖 {}", schedule, id)
+    } else if v.get("id").is_some() {
+        // --cron-remove → {"status":"ok","id":"..."}
+        let id = v["id"].as_str().unwrap_or("?");
+        format!("✅ Removed\n🔖 {}", id)
+    } else {
+        content.to_string()
     }
 }
 
@@ -4809,12 +4878,13 @@ async fn execute_schedule(
         };
         let result = if use_codex {
             let codex_model = model_clone_for_exec.as_deref().and_then(codex::strip_codex_prefix);
+            let codex_system_prompt = format!("{}{}", system_prompt_owned, codex_extra_instructions());
             codex::execute_command_streaming(
                 &prompt,
                 None,
                 &workspace_path_for_claude,
                 tx.clone(),
-                Some(&system_prompt_owned),
+                Some(&codex_system_prompt),
                 Some(&allowed_tools),
                 Some(cancel_token_clone),
                 codex_model,
@@ -4857,13 +4927,13 @@ async fn execute_schedule(
         let mut cancelled = false;
         let mut had_error = false;
         let mut spin_idx: usize = 0;
-        let mut pending_cokacdir_cmd: Option<String> = None;
+        let mut pending_cokacdir = false;
         let mut last_tool_name: String = String::new();
         let mut exec_session_id: Option<String> = None;
 
-        let polling_time_ms = {
+        let (polling_time_ms, silent_mode) = {
             let data = state_owned.lock().await;
-            data.polling_time_ms
+            (data.polling_time_ms, is_silent(&data.settings, chat_id))
         };
 
         let mut queue_done = false;
@@ -4892,12 +4962,12 @@ async fn execute_schedule(
                                 full_response.push_str(&content);
                             }
                             StreamMessage::ToolUse { name, input } => {
-                                pending_cokacdir_cmd = detect_cokacdir_command(&name, &input);
+                                pending_cokacdir = detect_cokacdir_command(&name, &input);
                                 last_tool_name = name.clone();
                                 let summary = format_tool_input(&name, &input);
                                 let ts = chrono::Local::now().format("%H:%M:%S");
                                 println!("  [{ts}]   ⚙ [Schedule] {name}: {summary}");
-                                if pending_cokacdir_cmd.is_none() {
+                                if !pending_cokacdir && !silent_mode {
                                     if name == "Bash" {
                                         full_response.push_str(&format!("\n\n```\n{}\n```\n", format_bash_command(&input)));
                                     } else {
@@ -4906,10 +4976,10 @@ async fn execute_schedule(
                                 }
                             }
                             StreamMessage::ToolResult { content, is_error } => {
-                                if let Some(cmd) = pending_cokacdir_cmd.take() {
+                                if std::mem::take(&mut pending_cokacdir) {
                                     let ts = chrono::Local::now().format("%H:%M:%S");
-                                    println!("  [{ts}]   ↩ [Schedule] cokacdir --{cmd}: {content}");
-                                    let formatted = format_cokacdir_result(&cmd, &content);
+                                    println!("  [{ts}]   ↩ [Schedule] cokacdir: {content}");
+                                    let formatted = format_cokacdir_result(&content);
                                     if !formatted.is_empty() {
                                         full_response.push_str(&format!("\n{}\n", formatted));
                                     }
@@ -4920,14 +4990,16 @@ async fn execute_schedule(
                                     } else {
                                         full_response.push_str(&format!("\n❌ `{}`\n\n", truncated));
                                     }
-                                } else if last_tool_name == "Read" {
-                                    full_response.push_str(&format!("\n✅ `{} bytes`\n\n", content.len()));
-                                } else if !content.is_empty() {
-                                    let truncated = truncate_str(&content, 300);
-                                    if truncated.contains('\n') {
-                                        full_response.push_str(&format!("\n```\n{}\n```\n", truncated));
-                                    } else {
-                                        full_response.push_str(&format!("\n✅ `{}`\n\n", truncated));
+                                } else if !silent_mode {
+                                    if last_tool_name == "Read" {
+                                        full_response.push_str(&format!("\n✅ `{} bytes`\n\n", content.len()));
+                                    } else if !content.is_empty() {
+                                        let truncated = truncate_str(&content, 300);
+                                        if truncated.contains('\n') {
+                                            full_response.push_str(&format!("\n```\n{}\n```\n", truncated));
+                                        } else {
+                                            full_response.push_str(&format!("\n✅ `{}`\n\n", truncated));
+                                        }
                                     }
                                 }
                             }
@@ -5017,7 +5089,7 @@ async fn execute_schedule(
                         libc::kill(pid as libc::pid_t, libc::SIGTERM);
                     }
                     #[cfg(windows)]
-                    { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).output(); }
+                    { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output(); }
                 }
             }
 

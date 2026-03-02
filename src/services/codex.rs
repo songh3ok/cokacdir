@@ -4,7 +4,7 @@ use std::sync::mpsc::Sender;
 use std::sync::OnceLock;
 use serde_json::Value;
 
-use crate::services::claude::{debug_log_to, StreamMessage, CancelToken};
+use crate::services::claude::{debug_log_to, StreamMessage, CancelToken, kill_child_tree};
 
 /// Cached path to the codex binary.
 static CODEX_PATH: OnceLock<Option<String>> = OnceLock::new();
@@ -166,6 +166,12 @@ pub fn execute_command_streaming(
     // Store child PID in cancel token
     if let Some(ref token) = cancel_token {
         *token.child_pid.lock().unwrap() = Some(child.id());
+        // If /stop arrived before PID was stored, kill immediately
+        if token.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            kill_child_tree(&mut child);
+            let _ = child.wait();
+            return Ok(());
+        }
     }
 
     // Write prompt to stdin
@@ -202,7 +208,7 @@ pub fn execute_command_streaming(
         if let Some(ref token) = cancel_token {
             if token.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
                 codex_debug_log("Cancel detected — killing child process");
-                let _ = child.kill();
+                kill_child_tree(&mut child);
                 let _ = child.wait();
                 return Ok(());
             }
@@ -278,7 +284,7 @@ pub fn execute_command_streaming(
     if let Some(ref token) = cancel_token {
         if token.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
             codex_debug_log("Cancel detected after loop — killing child process");
-            let _ = child.kill();
+            kill_child_tree(&mut child);
             let _ = child.wait();
             return Ok(());
         }
