@@ -1108,8 +1108,12 @@ async fn handle_message(
     if !text.starts_with("/start") {
         let mut data = state.lock().await;
         if !data.sessions.contains_key(&chat_id) {
+            msg_debug(&format!("[auto-restore] no in-memory session for chat_id={}", chat_id.0));
             if let Some(last_path) = data.settings.last_sessions.get(&chat_id.0.to_string()).cloned() {
-                if Path::new(&last_path).is_dir() {
+                msg_debug(&format!("[auto-restore] last_path from settings: {:?}", last_path));
+                let is_dir = Path::new(&last_path).is_dir();
+                msg_debug(&format!("[auto-restore] is_dir({:?}) = {}", last_path, is_dir));
+                if is_dir {
                     let auto_model = get_model(&data.settings, chat_id);
                     let auto_provider = if auto_model.is_some() {
                         if codex::is_codex_model(auto_model.as_deref()) { "codex" } else { "claude" }
@@ -1118,17 +1122,26 @@ async fn handle_message(
                     } else {
                         "claude"
                     };
+                    msg_debug(&format!("[auto-restore] auto_provider={}, auto_model={:?}", auto_provider, auto_model));
+                    msg_debug(&format!("[auto-restore] step1: load_existing_session(path={:?}, provider={:?})", last_path, auto_provider));
                     let existing = load_existing_session(&last_path, auto_provider)
                         .or_else(|| {
+                            msg_debug("[auto-restore] step1 returned None → trying fallback from external source");
                             let provider = if auto_provider == "codex" {
                                 SessionProvider::Codex
                             } else {
                                 SessionProvider::Claude
                             };
+                            msg_debug(&format!("[auto-restore] step2: find_latest_session_by_cwd(path={:?}, provider={:?})", last_path, auto_provider));
                             if let Some(info) = find_latest_session_by_cwd(&last_path, provider) {
+                                msg_debug(&format!("[auto-restore] step2 found: jsonl={}, session_id={}", info.jsonl_path.display(), info.session_id));
                                 convert_and_save_session(&info, &last_path);
-                                load_existing_session(&last_path, auto_provider)
+                                msg_debug("[auto-restore] step3: reload from ai_sessions after convert");
+                                let reloaded = load_existing_session(&last_path, auto_provider);
+                                msg_debug(&format!("[auto-restore] step3 result: {}", if reloaded.is_some() { "found" } else { "None" }));
+                                reloaded
                             } else {
+                                msg_debug("[auto-restore] step2 returned None → no external session found");
                                 None
                             }
                         });
@@ -1140,12 +1153,17 @@ async fn handle_message(
                     });
                     session.current_path = Some(last_path.clone());
                     if let Some((session_data, _)) = existing {
+                        msg_debug(&format!("[auto-restore] SUCCESS: session_id={}, history_len={}", session_data.session_id, session_data.history.len()));
                         session.session_id = Some(session_data.session_id.clone());
                         session.history = session_data.history.clone();
+                    } else {
+                        msg_debug("[auto-restore] FAIL: no session data found (local or external) → empty history");
                     }
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!("  [{ts}] ↻ [{user_name}] Auto-restored session: {last_path}");
                 }
+            } else {
+                msg_debug(&format!("[auto-restore] no last_path in settings for chat_id={}", chat_id.0));
             }
         }
     }
@@ -1460,16 +1478,21 @@ async fn handle_start_command(
     };
 
     // Try to load existing session for this path
-    msg_debug(&format!("[handle_start_command] provider={}", provider_str));
+    msg_debug(&format!("[handle_start_command] canonical_path={:?}, provider={}", canonical_path, provider_str));
     let existing = load_existing_session(&canonical_path, provider_str);
+    msg_debug(&format!("[handle_start_command] load_existing_session → {}", if existing.is_some() { "found" } else { "None" }));
 
     // If no local session, try converting the latest external session for this path
     let existing = if existing.is_some() {
         existing
     } else if let Some(info) = find_latest_session_by_cwd(&canonical_path, provider) {
+        msg_debug(&format!("[handle_start_command] fallback found: jsonl={}, session_id={}", info.jsonl_path.display(), info.session_id));
         convert_and_save_session(&info, &canonical_path);
-        load_existing_session(&canonical_path, provider_str)
+        let reloaded = load_existing_session(&canonical_path, provider_str);
+        msg_debug(&format!("[handle_start_command] after convert, reload → {}", if reloaded.is_some() { "found" } else { "None" }));
+        reloaded
     } else {
+        msg_debug("[handle_start_command] no external session found either");
         None
     };
 
@@ -1602,7 +1625,7 @@ fn is_uuid(s: &str) -> bool {
 }
 
 /// Provider that owns the resolved session.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum SessionProvider { Claude, Codex }
 
 /// Info returned when an external session is resolved.
@@ -1739,15 +1762,25 @@ fn resolve_codex_by_id(session_id: &str) -> Option<ResolvedSession> {
 /// Convert an external JSONL session to cokacdir SessionData and save it.
 /// Re-converts if the source JSONL is newer than the existing JSON.
 fn convert_and_save_session(info: &ResolvedSession, canonical_path: &str) {
-    let Some(sessions_dir) = ai_screen::ai_sessions_dir() else { return; };
+    msg_debug(&format!("[convert_session] start: jsonl={}, session_id={}, canonical_path={:?}",
+        info.jsonl_path.display(), info.session_id, canonical_path));
+    let Some(sessions_dir) = ai_screen::ai_sessions_dir() else {
+        msg_debug("[convert_session] ai_sessions_dir() returned None");
+        return;
+    };
     let target = sessions_dir.join(format!("{}.json", info.session_id));
+    msg_debug(&format!("[convert_session] target={}", target.display()));
     if target.exists() {
-        // Skip if target is up-to-date (source JSONL not newer than target JSON)
         let source_mtime = info.jsonl_path.metadata().ok().and_then(|m| m.modified().ok());
         let target_mtime = target.metadata().ok().and_then(|m| m.modified().ok());
+        msg_debug(&format!("[convert_session] target exists, source_mtime={:?}, target_mtime={:?}", source_mtime, target_mtime));
         if let (Some(src), Some(tgt)) = (source_mtime, target_mtime) {
-            if src <= tgt { return; }
+            if src <= tgt {
+                msg_debug("[convert_session] skipped: target is up-to-date");
+                return;
+            }
         } else {
+            msg_debug("[convert_session] skipped: cannot compare mtimes");
             return;
         }
     }
@@ -1756,34 +1789,51 @@ fn convert_and_save_session(info: &ResolvedSession, canonical_path: &str) {
         SessionProvider::Claude => parse_claude_jsonl,
         SessionProvider::Codex  => parse_codex_jsonl,
     };
-    let Some(session_data) = parser(&info.jsonl_path, &info.session_id, canonical_path) else { return; };
+    msg_debug(&format!("[convert_session] parsing with provider={:?}", info.provider));
+    let Some(session_data) = parser(&info.jsonl_path, &info.session_id, canonical_path) else {
+        msg_debug("[convert_session] parser returned None");
+        return;
+    };
+    msg_debug(&format!("[convert_session] parsed: history_len={}, provider={}", session_data.history.len(), session_data.provider));
     let _ = fs::create_dir_all(&sessions_dir);
     if let Ok(json) = serde_json::to_string_pretty(&session_data) {
-        let _ = fs::write(target, json);
+        let write_result = fs::write(&target, &json);
+        msg_debug(&format!("[convert_session] write result={:?}, bytes={}", write_result, json.len()));
+    } else {
+        msg_debug("[convert_session] serde_json::to_string_pretty failed");
     }
 }
 
 /// Find the most recently modified external session whose cwd matches the given path.
 fn find_latest_session_by_cwd(canonical_path: &str, provider: SessionProvider) -> Option<ResolvedSession> {
-    match provider {
+    msg_debug(&format!("[find_latest_by_cwd] canonical_path={:?}, provider={:?}", canonical_path, provider));
+    let result = match provider {
         SessionProvider::Claude => find_latest_claude_by_cwd(canonical_path),
         SessionProvider::Codex  => find_latest_codex_by_cwd(canonical_path),
-    }
+    };
+    msg_debug(&format!("[find_latest_by_cwd] result={}", if result.is_some() { "found" } else { "None" }));
+    result
 }
 
 /// Claude: scan all `~/.claude/projects/*/*.jsonl` for the latest session matching cwd.
 fn find_latest_claude_by_cwd(canonical_path: &str) -> Option<ResolvedSession> {
     let projects_dir = dirs::home_dir()?.join(".claude").join("projects");
+    msg_debug(&format!("[find_claude_by_cwd] projects_dir={}, is_dir={}", projects_dir.display(), projects_dir.is_dir()));
     if !projects_dir.is_dir() { return None; }
     let mut best_path: Option<std::path::PathBuf> = None;
     let mut best_time = std::time::UNIX_EPOCH;
+    let mut scan_count = 0u32;
+    let mut cwd_mismatch_sample: Option<String> = None;
     for proj_entry in fs::read_dir(&projects_dir).ok()?.flatten() {
         if !proj_entry.file_type().map_or(false, |t| t.is_dir()) { continue; }
         let Ok(file_entries) = fs::read_dir(proj_entry.path()) else { continue; };
         for file_entry in file_entries.flatten() {
             let path = file_entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("jsonl") { continue; }
+            scan_count += 1;
             if let Some(cwd) = extract_cwd_from_jsonl(&path) {
+                msg_debug(&format!("[find_claude_by_cwd] file={}, extracted_cwd={:?}, want={:?}, match={}",
+                    path.display(), cwd, canonical_path, cwd == canonical_path));
                 if cwd == canonical_path {
                     let mtime = path.metadata().ok()
                         .and_then(|m| m.modified().ok())
@@ -1792,8 +1842,18 @@ fn find_latest_claude_by_cwd(canonical_path: &str) -> Option<ResolvedSession> {
                         best_path = Some(path);
                         best_time = mtime;
                     }
+                } else if cwd_mismatch_sample.is_none() {
+                    cwd_mismatch_sample = Some(cwd);
                 }
+            } else {
+                msg_debug(&format!("[find_claude_by_cwd] file={}, extract_cwd returned None", path.display()));
             }
+        }
+    }
+    msg_debug(&format!("[find_claude_by_cwd] scanned {} jsonl files, best={:?}", scan_count, best_path.as_ref().map(|p| p.display().to_string())));
+    if best_path.is_none() {
+        if let Some(sample) = cwd_mismatch_sample {
+            msg_debug(&format!("[find_claude_by_cwd] cwd mismatch example: extracted={:?} vs wanted={:?}", sample, canonical_path));
         }
     }
     let jsonl_path = best_path?;
@@ -2056,10 +2116,12 @@ fn extract_cwd_from_jsonl(path: &Path) -> Option<String> {
         if !line.contains("\"cwd\"") { continue; }
         if let Some(cwd) = extract_json_string_field(&line, "cwd") {
             if !cwd.is_empty() {
+                msg_debug(&format!("[extract_cwd] file={}, cwd={:?}", path.display(), cwd));
                 return Some(cwd);
             }
         }
     }
+    msg_debug(&format!("[extract_cwd] file={}, no cwd found", path.display()));
     None
 }
 
@@ -2074,12 +2136,10 @@ fn extract_json_string_field(json: &str, field: &str) -> Option<String> {
     let bytes = rest.as_bytes();
     while end < bytes.len() {
         if bytes[end] == b'"' {
-            // Count preceding backslashes to check if this quote is escaped
             let mut backslashes = 0;
             while end > backslashes && bytes[end - 1 - backslashes] == b'\\' {
                 backslashes += 1;
             }
-            // Unescaped quote: odd number of backslashes means the quote itself is escaped
             if backslashes % 2 == 0 {
                 break;
             }
@@ -2087,7 +2147,14 @@ fn extract_json_string_field(json: &str, field: &str) -> Option<String> {
         end += 1;
     }
     if end >= bytes.len() { return None; }
-    Some(rest[..end].to_string())
+    // Unescape JSON string (e.g. "\\\\" → "\\", "\\\"" → "\"")
+    let raw = &rest[..end];
+    let quoted = format!("\"{}\"", raw);
+    let unescaped = serde_json::from_str::<String>(&quoted).unwrap_or_else(|_| raw.to_string());
+    if field == "cwd" {
+        msg_debug(&format!("[extract_field] field={}, raw={:?}, unescaped={:?}", field, raw, unescaped));
+    }
+    Some(unescaped)
 }
 
 /// Handle /WORKSPACE_ID command - resume a workspace session by its ID
@@ -3855,19 +3922,23 @@ async fn handle_text_message(
 
 /// Load existing session from ai_sessions directory matching the given path and provider
 fn load_existing_session(current_path: &str, provider: &str) -> Option<(SessionData, std::time::SystemTime)> {
-    msg_debug(&format!("[load_session] looking for path={}, provider={}", current_path, provider));
+    msg_debug(&format!("[load_session] looking for path={:?}, provider={}", current_path, provider));
     let sessions_dir = ai_screen::ai_sessions_dir()?;
 
     if !sessions_dir.exists() {
+        msg_debug(&format!("[load_session] sessions_dir not found: {}", sessions_dir.display()));
         return None;
     }
 
     let mut matching_session: Option<(SessionData, std::time::SystemTime)> = None;
+    let mut file_count = 0u32;
+    let mut path_mismatch_sample: Option<String> = None;
 
     if let Ok(entries) = fs::read_dir(&sessions_dir) {
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.extension().map(|e| e == "json").unwrap_or(false) {
+                file_count += 1;
                 if let Ok(content) = fs::read_to_string(&path) {
                     if let Ok(session_data) = serde_json::from_str::<SessionData>(&content) {
                         if session_data.current_path == current_path {
@@ -3877,8 +3948,8 @@ fn load_existing_session(current_path: &str, provider: &str) -> Option<(SessionD
                                     session_data.session_id, session_data.provider, provider));
                                 continue;
                             }
-                            msg_debug(&format!("[load_session] found session_id={}, provider={}, path={}",
-                                session_data.session_id, session_data.provider, session_data.current_path));
+                            msg_debug(&format!("[load_session] found session_id={}, provider={}, history_len={}, stored_path={:?}",
+                                session_data.session_id, session_data.provider, session_data.history.len(), session_data.current_path));
                             if let Ok(metadata) = path.metadata() {
                                 if let Ok(modified) = metadata.modified() {
                                     match &matching_session {
@@ -3890,10 +3961,20 @@ fn load_existing_session(current_path: &str, provider: &str) -> Option<(SessionD
                                     }
                                 }
                             }
+                        } else if path_mismatch_sample.is_none() {
+                            path_mismatch_sample = Some(session_data.current_path.clone());
                         }
                     }
                 }
             }
+        }
+    }
+
+    msg_debug(&format!("[load_session] scanned {} json files, result={}", file_count,
+        if matching_session.is_some() { "found" } else { "None" }));
+    if matching_session.is_none() && file_count > 0 {
+        if let Some(sample) = path_mismatch_sample {
+            msg_debug(&format!("[load_session] path mismatch example: stored={:?} vs wanted={:?}", sample, current_path));
         }
     }
 
