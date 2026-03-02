@@ -230,6 +230,9 @@ fn list_schedule_entries(bot_key: &str, chat_id: Option<i64>) -> Vec<ScheduleEnt
         sched_debug("[list_schedule_entries] no schedule dir");
         return Vec::new();
     };
+    if !dir.is_dir() {
+        return Vec::new();
+    }
     let Ok(entries) = fs::read_dir(&dir) else {
         sched_debug("[list_schedule_entries] read_dir failed");
         return Vec::new();
@@ -1159,6 +1162,8 @@ async fn handle_message(
                         msg_debug(&format!("[auto-restore] SUCCESS: session_id={}, history_len={}", session_data.session_id, session_data.history.len()));
                         if !session_data.session_id.is_empty() {
                             session.session_id = Some(session_data.session_id.clone());
+                        } else {
+                            cleanup_session_files(&last_path, auto_provider);
                         }
                         session.history = session_data.history.clone();
                     } else {
@@ -1533,6 +1538,8 @@ async fn handle_start_command(
         if let Some((session_data, _)) = &existing {
             if !session_data.session_id.is_empty() {
                 session.session_id = Some(session_data.session_id.clone());
+            } else {
+                cleanup_session_files(&canonical_path, provider_str);
             }
             session.current_path = Some(canonical_path.clone());
             session.history = session_data.history.clone();
@@ -2273,6 +2280,8 @@ async fn handle_workspace_resume(
         if let Some((session_data, _)) = &existing {
             if !session_data.session_id.is_empty() {
                 session.session_id = Some(session_data.session_id.clone());
+            } else {
+                cleanup_session_files(&canonical_path, ws_provider);
             }
             session.current_path = Some(canonical_path.clone());
             session.history = session_data.history.clone();
@@ -2345,8 +2354,10 @@ async fn handle_clear_command(
     }
 
     // Overwrite session file with minimal data (keeps file present to block external restore)
+    // Then keep only one and delete the rest.
     if let Some(ref path) = current_path {
         if let Some(sessions_dir) = crate::ui::ai_screen::ai_sessions_dir() {
+            let mut cleared_files: Vec<std::path::PathBuf> = Vec::new();
             if let Ok(entries) = fs::read_dir(&sessions_dir) {
                 for entry in entries.filter_map(|e| e.ok()) {
                     let file_path = entry.path();
@@ -2360,11 +2371,16 @@ async fn handle_clear_command(
                                     if let Ok(json) = serde_json::to_string_pretty(&cleared) {
                                         let _ = fs::write(&file_path, json);
                                     }
+                                    cleared_files.push(file_path);
                                 }
                             }
                         }
                     }
                 }
+            }
+            // Keep the first cleared file, delete the rest
+            for file_path in cleared_files.iter().skip(1) {
+                let _ = fs::remove_file(file_path);
             }
         }
     }
@@ -4009,7 +4025,8 @@ fn load_existing_session(current_path: &str, provider: &str) -> Option<(SessionD
         return None;
     }
 
-    let mut matching_session: Option<(SessionData, std::time::SystemTime)> = None;
+    let mut with_session_id: Option<(SessionData, std::time::SystemTime)> = None;
+    let mut without_session_id: Option<(SessionData, std::time::SystemTime)> = None;
     let mut file_count = 0u32;
     let mut path_mismatch_sample: Option<String> = None;
 
@@ -4031,10 +4048,15 @@ fn load_existing_session(current_path: &str, provider: &str) -> Option<(SessionD
                                 session_data.session_id, session_data.provider, session_data.history.len(), session_data.current_path));
                             if let Ok(metadata) = path.metadata() {
                                 if let Ok(modified) = metadata.modified() {
-                                    match &matching_session {
-                                        None => matching_session = Some((session_data, modified)),
+                                    let target = if !session_data.session_id.is_empty() {
+                                        &mut with_session_id
+                                    } else {
+                                        &mut without_session_id
+                                    };
+                                    match target {
+                                        None => *target = Some((session_data, modified)),
                                         Some((_, latest_time)) if modified > *latest_time => {
-                                            matching_session = Some((session_data, modified));
+                                            *target = Some((session_data, modified));
                                         }
                                         _ => {}
                                     }
@@ -4049,6 +4071,8 @@ fn load_existing_session(current_path: &str, provider: &str) -> Option<(SessionD
         }
     }
 
+    let matching_session = with_session_id.or(without_session_id);
+
     msg_debug(&format!("[load_session] scanned {} json files, result={}", file_count,
         if matching_session.is_some() { "found" } else { "None" }));
     if matching_session.is_none() && file_count > 0 {
@@ -4058,6 +4082,51 @@ fn load_existing_session(current_path: &str, provider: &str) -> Option<(SessionD
     }
 
     matching_session
+}
+
+/// Remove stale session files without session_id for the same current_path + provider.
+/// Called when no file with session_id exists for this path+provider.
+/// Keeps the most recently modified empty file (the one selected by load_existing_session)
+/// and deletes the rest.
+fn cleanup_session_files(current_path: &str, provider: &str) {
+    let Some(sessions_dir) = ai_screen::ai_sessions_dir() else { return; };
+    let Ok(entries) = fs::read_dir(&sessions_dir) else { return; };
+
+    // Collect matching empty files with their modification time
+    let mut empty_files: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().map(|e| e == "json").unwrap_or(false) {
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(data) = serde_json::from_str::<SessionData>(&content) {
+                    if data.current_path == current_path
+                        && (data.provider == provider || data.provider.is_empty())
+                        && data.session_id.is_empty()
+                    {
+                        let modified = path.metadata().ok()
+                            .and_then(|m| m.modified().ok())
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                        empty_files.push((path, modified));
+                    }
+                }
+            }
+        }
+    }
+
+    if empty_files.len() <= 1 { return; }
+
+    // Find the latest modified one to keep
+    let latest_idx = empty_files.iter().enumerate()
+        .max_by_key(|(_, (_, t))| *t)
+        .map(|(i, _)| i)
+        .unwrap();
+
+    // Delete all except the latest
+    for (i, (path, _)) in empty_files.iter().enumerate() {
+        if i != latest_idx {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 /// Save session to file in the ai_sessions directory
@@ -4109,7 +4178,27 @@ fn save_session_to_file(session: &ChatSession, current_path: &str, provider: &st
     let file_path = sessions_dir.join(format!("{}.json", session_id));
 
     if let Ok(json) = serde_json::to_string_pretty(&session_data) {
-        let _ = fs::write(file_path, json);
+        let _ = fs::write(&file_path, json);
+    }
+
+    // Clean up old session files without session_id (e.g. /clear blocker files)
+    if let Ok(entries) = fs::read_dir(&sessions_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let p = entry.path();
+            if p == file_path { continue; }
+            if p.extension().map(|e| e == "json").unwrap_or(false) {
+                if let Ok(content) = fs::read_to_string(&p) {
+                    if let Ok(old) = serde_json::from_str::<SessionData>(&content) {
+                        if old.current_path == current_path
+                            && (old.provider == provider || old.provider.is_empty())
+                            && old.session_id.is_empty()
+                        {
+                            let _ = fs::remove_file(&p);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
