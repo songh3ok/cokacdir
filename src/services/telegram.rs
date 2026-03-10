@@ -967,6 +967,7 @@ pub async fn run_bot(token: &str) {
         teloxide::types::BotCommand::new("help", "Show help"),
         teloxide::types::BotCommand::new("start", "Start session at directory"),
         teloxide::types::BotCommand::new("pwd", "Show current working directory"),
+        teloxide::types::BotCommand::new("session", "Show current session ID"),
         teloxide::types::BotCommand::new("clear", "Clear AI conversation history"),
         teloxide::types::BotCommand::new("stop", "Stop current AI request"),
         teloxide::types::BotCommand::new("down", "Download file from server"),
@@ -1230,6 +1231,10 @@ async fn handle_message(
         msg_debug(&format!("[handle_message] routing → /pwd"));
         println!("  [{timestamp}] ◀ [{user_name}] /pwd");
         handle_pwd_command(&bot, chat_id, &state).await?;
+    } else if text.starts_with("/session") {
+        msg_debug(&format!("[handle_message] routing → /session"));
+        println!("  [{timestamp}] ◀ [{user_name}] /session");
+        handle_session_command(&bot, chat_id, &state).await?;
     } else if text.starts_with("/down") {
         msg_debug(&format!("[handle_message] routing → /down"));
         println!("  [{timestamp}] ◀ [{user_name}] /down {}", text.strip_prefix("/down").unwrap_or("").trim());
@@ -1323,6 +1328,7 @@ Manage server files &amp; chat with Claude AI.
 <code>/start &lt;name|id&gt;</code> — Resume Claude Code session
 <code>/start</code> — Start with auto-generated workspace
 <code>/pwd</code> — Show current working directory
+<code>/session</code> — Show current session ID
 <code>/clear</code> — Clear AI conversation history
 <code>/stop</code> — Stop current AI request
 
@@ -2437,6 +2443,43 @@ async fn handle_pwd_command(
             tg!("send_message", bot.send_message(chat_id, msg).await)?
         }
         None => tg!("send_message", bot.send_message(chat_id, "No active session. Use /start <path> first.").await)?,
+    };
+
+    Ok(())
+}
+
+/// Handle /session command - show current session UUID and resume command
+async fn handle_session_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    state: &SharedState,
+) -> ResponseResult<()> {
+    let (session_id, current_path, is_codex) = {
+        let data = state.lock().await;
+        let sid = data.sessions.get(&chat_id).and_then(|s| s.session_id.clone());
+        let path = data.sessions.get(&chat_id).and_then(|s| s.current_path.clone());
+        let codex = codex::is_codex_model(get_model(&data.settings, chat_id).as_deref());
+        (sid, path, codex)
+    };
+
+    shared_rate_limit_wait(state, chat_id).await;
+    match (session_id, current_path) {
+        (Some(id), Some(path)) => {
+            let resume_cmd = if is_codex {
+                format!("codex resume {}", id)
+            } else {
+                format!("claude --resume {}", id)
+            };
+            let provider = if is_codex { "Codex" } else { "Claude" };
+            let msg = format!(
+                "Current {} session ID:\n`{}`\n\nTo resume this session from your terminal:\n`cd \"{}\"; {}`",
+                provider, id, path, resume_cmd
+            );
+            tg!("send_message", bot.send_message(chat_id, msg).await)?
+        }
+        _ => {
+            tg!("send_message", bot.send_message(chat_id, "No active session.").await)?
+        }
     };
 
     Ok(())
