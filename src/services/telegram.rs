@@ -958,7 +958,16 @@ fn build_system_prompt(role: &str, current_path: &str, chat_id: i64, bot_key: &s
              • Clearly state what you are working on — your messages are recorded in the shared log for other bots.\n\
              • Before modifying shared files or directories, check the log to see if another bot is working on the same area.\n\
              • When your work depends on or affects another bot's output, communicate via --message (described below).\n\
-             • If you need results from another bot's task, check the log first — the answer may already be there.",
+             • If you need results from another bot's task, check the log first — the answer may already be there.\n\n\
+             INDIVIDUALITY RULE:\n\
+             Each bot is an independent entity with its own personality and perspective.\n\
+             Even when covering the same topic as another bot, you MUST express it in your own words and from your own viewpoint.\n\
+             NEVER parrot, echo, or closely rephrase what another bot already said.\n\
+             If a previous bot already gave an answer, either add a genuinely new angle, provide additional depth, or simply acknowledge it briefly and move on.\n\
+             Redundant repetition wastes the user's time and makes the group chat less valuable.\n\n\
+             BREVITY RULE:\n\
+             You are a participant in a group chat. Writing long messages alone is inconsiderate to other participants.\n\
+             Keep your answers short and concise — ideally one or two sentences.",
         )
     } else {
         String::new()
@@ -3424,26 +3433,10 @@ async fn handle_stop_command(
                 return Ok(());
             }
 
-            // Send immediate feedback to user
-            shared_rate_limit_wait(state, chat_id).await;
-            let stop_msg = tg!("send_message", bot.send_message(chat_id, "Stopping...").await)?;
-
-            // Store the stop message ID only if the task is still running.
-            // If cancel_token was already removed (task finished during "Stopping..." send),
-            // delete the orphaned message immediately instead of inserting.
-            {
-                let mut data = state.lock().await;
-                if data.cancel_tokens.contains_key(&chat_id) {
-                    data.stop_message_ids.insert(chat_id, stop_msg.id);
-                } else {
-                    drop(data);
-                    shared_rate_limit_wait(state, chat_id).await;
-                    let _ = tg!("delete_message", bot.delete_message(chat_id, stop_msg.id).await);
-                    return Ok(());
-                }
-            }
-
-            // Set cancellation flag
+            // Set cancellation flag IMMEDIATELY to prevent race condition:
+            // Without this, the window between receiving /stop and setting cancelled
+            // (during rate_limit_wait + "Stopping..." network call) allows a concurrent
+            // claude::execute to pass its cancelled check and start an API request.
             token.cancelled.store(true, Ordering::Relaxed);
 
             // Kill child process directly to unblock reader.lines()
@@ -3461,6 +3454,25 @@ async fn handle_stop_command(
 
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!("  [{ts}] ■ Cancel signal sent");
+
+            // Send feedback to user (after cancellation to avoid delay)
+            shared_rate_limit_wait(state, chat_id).await;
+            let stop_msg = tg!("send_message", bot.send_message(chat_id, "Stopping...").await)?;
+
+            // Store the stop message ID only if the task is still running.
+            // If cancel_token was already removed (task finished during "Stopping..." send),
+            // delete the orphaned message immediately instead of inserting.
+            {
+                let mut data = state.lock().await;
+                if data.cancel_tokens.contains_key(&chat_id) {
+                    data.stop_message_ids.insert(chat_id, stop_msg.id);
+                } else {
+                    drop(data);
+                    shared_rate_limit_wait(state, chat_id).await;
+                    let _ = tg!("delete_message", bot.delete_message(chat_id, stop_msg.id).await);
+                    return Ok(());
+                }
+            }
         }
         None => {
             shared_rate_limit_wait(state, chat_id).await;
