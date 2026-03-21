@@ -1,4 +1,4 @@
-import { Github, Youtube, FileText, Cpu, GraduationCap, Cloud, Apple, Monitor, Zap, Send } from 'lucide-react'
+import { Github, Youtube, FileText, Cpu, GraduationCap, Cloud, Apple, Monitor, Zap, Send, Lightbulb } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useLanguage } from './tutorial/LanguageContext'
 
@@ -59,6 +59,13 @@ export default function Footer() {
             >
               <Send className="w-5 h-5" />
               <span className="text-sm">{t('Bot Tutorial', '봇 튜토리얼')}</span>
+            </Link>
+            <Link
+              to="/tips"
+              className="flex items-center gap-2 text-zinc-400 hover:text-white transition-colors"
+            >
+              <Lightbulb className="w-5 h-5" />
+              <span className="text-sm">{t('Tips & Guides', '팁 & 가이드')}</span>
             </Link>
             <Link
               to="/ec2"

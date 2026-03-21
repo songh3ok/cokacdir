@@ -10,9 +10,17 @@ export default function SectionHeading({ id, level = 2, children }: SectionHeadi
     ? 'text-2xl sm:text-3xl font-bold text-white border-l-4 border-accent-cyan pl-4 mb-6'
     : 'text-xl sm:text-2xl font-semibold text-white border-l-2 border-accent-cyan/50 pl-3 mb-4'
 
+  const handleClick = (e: React.MouseEvent) => {
+    e.preventDefault()
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
+    // Update URL for shareable anchor links (e.g. /#/tips?s=change-model)
+    const base = window.location.hash.split('?')[0]
+    window.history.replaceState(null, '', `${base}?s=${id}`)
+  }
+
   return (
     <Tag id={id} className={`${baseClass} scroll-mt-24`}>
-      <a href={`#${id}`} className="hover:text-accent-cyan transition-colors">
+      <a href={`#${id}`} onClick={handleClick} className="hover:text-accent-cyan transition-colors">
         {children}
       </a>
     </Tag>

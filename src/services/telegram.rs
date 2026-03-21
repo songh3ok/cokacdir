@@ -1935,20 +1935,7 @@ async fn handle_message(
                 }
                 msg_debug(&format!("[handle_message] upload: accepted (@{} mention)", bot_username));
             } else if caption.starts_with(';') {
-                // Check for ";@botname" — targeting a specific bot
-                let after_semi = caption[1..].trim_start();
-                if !bot_username.is_empty() && after_semi.starts_with('@') {
-                    let at_body = &after_semi[1..];
-                    let mention_end = at_body.find(|c: char| c.is_whitespace()).unwrap_or(at_body.len());
-                    let mentioned = &at_body[..mention_end];
-                    if mentioned.to_lowercase() != bot_username.to_lowercase() {
-                        msg_debug(&format!("[handle_message] upload: rejected (;@{} for another bot)", mentioned));
-                        return Ok(());
-                    }
-                    msg_debug(&format!("[handle_message] upload: accepted (;@{} mention)", bot_username));
-                } else {
-                    msg_debug("[handle_message] upload: accepted (; prefix, all bots)");
-                }
+                msg_debug("[handle_message] upload: accepted (; prefix, all bots)");
             } else {
                 msg_debug("[handle_message] upload: rejected (no ; or @ prefix)");
                 return Ok(());
@@ -1964,7 +1951,7 @@ async fn handle_message(
         if let Some(caption) = msg.caption() {
             let text_part = if require_prefix {
                 // Group chat (prefix mode): extract message text from caption
-                // Formats: ";text", "@botname text", "@botname ;text", ";@botname text"
+                // Formats: ";text", "@botname text", "@botname ;text"
                 let extracted = if !bot_username.is_empty() && caption.starts_with('@') {
                     // "@botname text" → extract text after @botname
                     let prefix = format!("@{} ", bot_username);
@@ -1975,15 +1962,7 @@ async fn handle_message(
                         ""
                     }
                 } else if caption.starts_with(';') {
-                    let after_semi = caption[1..].trim_start();
-                    if !bot_username.is_empty() && after_semi.starts_with('@') {
-                        // ";@botname text" → extract text after @botname
-                        let at_body = &after_semi[1..];
-                        let mention_end = at_body.find(|c: char| c.is_whitespace()).unwrap_or(at_body.len());
-                        after_semi[1 + mention_end..].trim_start()
-                    } else {
-                        after_semi
-                    }
+                    caption[1..].trim_start()
                 } else {
                     ""
                 };

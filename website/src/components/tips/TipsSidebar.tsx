@@ -10,15 +10,40 @@ interface TocItem {
 }
 
 const tocItems: TocItem[] = [
-  { id: 'telegram-bot', en: 'Telegram Remote', ko: 'Telegram 원격 제어' },
-  { id: 'telegram-create-bot', en: 'Create Bot', ko: 'Bot 만들기', indent: true },
-  { id: 'telegram-setup', en: 'Setup & Start', ko: '설정 및 시작', indent: true },
-  { id: 'telegram-commands', en: 'Commands', ko: '사용 가능한 명령어', indent: true },
-  { id: 'telegram-tools', en: 'Tool Management', ko: 'AI 도구 관리', indent: true },
-  { id: 'telegram-workflow', en: 'Workflow Examples', ko: '실전 워크플로우', indent: true },
+  { id: 'change-model', en: 'Changing AI Model', ko: 'AI 모델 변경하기' },
+  { id: 'change-model-check', en: 'Check Current Model', ko: '현재 모델 확인', indent: true },
+  { id: 'change-model-switch', en: 'Switch Model', ko: '모델 변경', indent: true },
+  { id: 'change-model-providers', en: 'Available Providers', ko: '사용 가능한 Provider', indent: true },
+  { id: 'change-model-provider-switch', en: 'Switching Providers', ko: 'Provider 전환 시 주의', indent: true },
+  { id: 'change-model-tips', en: 'Model Selection Tips', ko: '모델 선택 팁', indent: true },
+  { id: 'session-management', en: 'Session Management', ko: '세션 관리' },
+  { id: 'session-start', en: 'Starting a Session', ko: '세션 시작하기', indent: true },
+  { id: 'session-resume', en: 'Resuming a Session', ko: '세션 이어가기', indent: true },
+  { id: 'session-auto-restore', en: 'Auto-Restore', ko: '자동 복원', indent: true },
+  { id: 'session-workspace', en: 'Workspace Sessions', ko: '워크스페이스 세션', indent: true },
+  { id: 'session-by-name', en: 'Resume by Name/ID', ko: '이름/ID로 이어가기', indent: true },
+  { id: 'session-clear', en: 'Clearing a Session', ko: '세션 초기화', indent: true },
+  { id: 'session-info', en: 'Checking Session Info', ko: '세션 정보 확인', indent: true },
+  { id: 'session-lifecycle', en: 'Session Lifecycle', ko: '세션 생명주기', indent: true },
+  { id: 'instruction', en: 'System Instruction', ko: '시스템 인스트럭션' },
+  { id: 'instruction-set', en: 'Setting an Instruction', ko: '인스트럭션 설정하기', indent: true },
+  { id: 'instruction-view', en: 'View Current', ko: '현재 인스트럭션 확인', indent: true },
+  { id: 'instruction-clear', en: 'Clear Instruction', ko: '인스트럭션 삭제', indent: true },
+  { id: 'instruction-persistence', en: 'Persistence', ko: '영속성', indent: true },
+  { id: 'instruction-examples', en: 'Example Use Cases', ko: '활용 예시', indent: true },
+  { id: 'instruction-group', en: 'In Group Chats', ko: '그룹 채팅에서', indent: true },
+  { id: 'instruction-reference', en: 'Quick Reference', ko: '빠른 참조', indent: true },
+  { id: 'group-chat', en: 'Multiple Bots in Group', ko: '그룹에서 여러 봇 다루기' },
+  { id: 'group-addressing', en: 'Addressing a Bot', ko: '특정 봇에게 말 걸기', indent: true },
+  { id: 'group-file-upload', en: 'File Uploads', ko: '파일 업로드', indent: true },
+  { id: 'group-direct-mode', en: 'Direct Mode', ko: '다이렉트 모드', indent: true },
+  { id: 'group-access-control', en: 'Access Control', ko: '접근 제어', indent: true },
+  { id: 'group-collaboration', en: 'Bot Collaboration', ko: '봇 간 협업', indent: true },
+  { id: 'group-per-bot-config', en: 'Per-Bot Configuration', ko: '봇별 설정', indent: true },
+  { id: 'group-reference', en: 'Quick Reference', ko: '빠른 참조', indent: true },
 ]
 
-export default function TelegramTutorialSidebar() {
+export default function TipsSidebar() {
   const { lang, t } = useLanguage()
   const [activeId, setActiveId] = useState('')
   const [mobileOpen, setMobileOpen] = useState(false)

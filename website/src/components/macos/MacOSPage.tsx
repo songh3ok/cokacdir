@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
-import { ArrowLeft, Github, Apple, Bot, Terminal, Copy, Check, Rocket, MessageCircle, RefreshCw } from 'lucide-react'
+import { ArrowLeft, Github, Apple, Bot, Terminal, Copy, Check, Rocket, MessageCircle, RefreshCw, Settings, Activity, FileText, Square, Trash2, Play, Repeat } from 'lucide-react'
 import { LanguageProvider, useLanguage } from '../tutorial/LanguageContext'
 
 function LanguageToggle() {
@@ -259,8 +259,8 @@ function MacOSPageInner() {
           <SectionCard icon={Apple} title={t('Register Background Service', '백그라운드 서비스 등록')} step={3}>
             <p>
               {t(
-                <>Register a macOS system service with the Telegram bot token you received. It will <strong className="text-white">start automatically</strong> even after rebooting your computer.</>,
-                <>발급받은 텔레그램 봇 토큰으로 macOS 시스템 서비스를 등록합니다. 컴퓨터를 껐다 켜도 <strong className="text-white">자동으로 구동</strong>됩니다.</>
+                <>Starts cokacdir <strong className="text-white">immediately</strong> and registers it to <strong className="text-white">start automatically</strong> even after rebooting your computer.</>,
+                <>cokacdir을 <strong className="text-white">즉시 구동</strong>함과 동시에 컴퓨터가 재시작되어도 <strong className="text-white">자동으로 실행</strong>되도록 등록합니다.</>
               )}
             </p>
 
@@ -284,6 +284,24 @@ function MacOSPageInner() {
                   <><Hl>{'<텔레그램봇토큰>'}</Hl> 부분을 BotFather에서 발급받은 실제 토큰으로 바꿔 넣고 실행하세요.</>
                 )}
               </p>
+            </div>
+
+            <div className="mt-4 p-4 rounded-lg border border-zinc-700 bg-bg-card space-y-3">
+              <p className="text-sm text-zinc-300">
+                {t(
+                  <>If you re-run the command with a <strong className="text-white">different token</strong>, the previously running bot will be stopped and the new token's bot will start.</>,
+                  <>이 명령어를 <strong className="text-white">다른 토큰</strong>으로 바꿔서 재실행하면 기존 봇은 종료되고 새 토큰의 봇이 구동됩니다.</>
+                )}
+              </p>
+              <p className="text-sm text-zinc-300">
+                {t(
+                  <>You can also run <strong className="text-white">multiple bots</strong> simultaneously by passing multiple tokens:</>,
+                  <><strong className="text-white">여러 개의 봇</strong>을 동시에 구동할 수도 있습니다:</>
+                )}
+              </p>
+              <CopyBlock code={`npx -y service-setup-cokacdir <토큰1> <토큰2> <토큰3>`} label="Terminal">
+{`npx -y service-setup-cokacdir `}<Hl>{'<토큰1>'}</Hl>{` `}<Hl>{'<토큰2>'}</Hl>{` `}<Hl>{'<토큰3>'}</Hl>
+              </CopyBlock>
             </div>
           </SectionCard>
 
@@ -394,6 +412,132 @@ function MacOSPageInner() {
                   )}
                 </p>
               </div>
+            </div>
+          </motion.section>
+
+          {/* Service Management Divider */}
+          <div className="flex items-center gap-4 my-12">
+            <div className="flex-1 h-px bg-zinc-800" />
+            <div className="flex items-center gap-2 text-zinc-500 text-sm font-medium">
+              <Settings className="w-4 h-4" />
+              {t('Service Management', '서비스 관리')}
+            </div>
+            <div className="flex-1 h-px bg-zinc-800" />
+          </div>
+
+          <motion.section
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ duration: 0.5 }}
+            className="mb-10"
+          >
+            <div className="flex items-center gap-3 mb-5">
+              <div className="flex-shrink-0 w-10 h-10 rounded-full bg-accent-cyan/20 border border-accent-cyan/50 flex items-center justify-center">
+                <Settings className="w-5 h-5 text-accent-cyan" />
+              </div>
+              <h2 className="text-xl sm:text-2xl font-bold text-white">{t('Service Management Commands', '서비스 관리 명령어')}</h2>
+            </div>
+            <div className="ml-0 sm:ml-[52px] text-zinc-300 text-sm sm:text-base leading-relaxed space-y-6">
+
+              {/* Change Token */}
+              <div className="p-4 rounded-lg border border-zinc-800 bg-bg-card space-y-2">
+                <div className="flex items-center gap-2 mb-2">
+                  <Repeat className="w-4 h-4 text-accent-purple" />
+                  <h3 className="text-white font-semibold">{t('Change Token', '토큰 변경')}</h3>
+                </div>
+                <p className="text-sm text-zinc-400">
+                  {t(
+                    'To switch to a different bot token, simply re-run the registration command with the new token. The previously running bot will be stopped automatically and the new bot will start.',
+                    '다른 봇 토큰으로 변경하고 싶다면 새 토큰으로 등록 명령어를 다시 실행하면 됩니다. 기존 봇은 자동으로 종료되고 새 토큰의 봇이 구동됩니다.'
+                  )}
+                </p>
+                <CopyBlock code={`npx -y service-setup-cokacdir <새토큰>`} label="Terminal">
+{`npx -y service-setup-cokacdir `}<Hl>{'<새토큰>'}</Hl>
+                </CopyBlock>
+              </div>
+
+              {/* Status */}
+              <div className="p-4 rounded-lg border border-zinc-800 bg-bg-card space-y-2">
+                <div className="flex items-center gap-2 mb-2">
+                  <Activity className="w-4 h-4 text-accent-green" />
+                  <h3 className="text-white font-semibold">{t('Check Status', '상태 확인')}</h3>
+                </div>
+                <p className="text-sm text-zinc-400">
+                  {t(
+                    'Check if cokacdir is currently running on your computer.',
+                    '현재 cokacdir이 컴퓨터에서 구동되고 있는지 확인합니다.'
+                  )}
+                </p>
+                <CopyBlock code="launchctl list | grep com.cokacdir.server" label="Terminal" />
+                <p className="text-xs text-zinc-500">
+                  {t(
+                    'If nothing is printed, cokacdir is not running.',
+                    '아무것도 출력되지 않는다면 구동되고 있지 않은 것입니다.'
+                  )}
+                </p>
+              </div>
+
+              {/* Logs */}
+              <div className="p-4 rounded-lg border border-zinc-800 bg-bg-card space-y-2">
+                <div className="flex items-center gap-2 mb-2">
+                  <FileText className="w-4 h-4 text-accent-cyan" />
+                  <h3 className="text-white font-semibold">{t('View Logs', '로그 확인')}</h3>
+                </div>
+                <p className="text-sm text-zinc-400">
+                  {t(
+                    'View the cokacdir logs in real time.',
+                    'cokacdir의 로그를 실시간으로 확인합니다.'
+                  )}
+                </p>
+                <CopyBlock code="tail -f ~/Library/Logs/cokacdir/cokacdir.log" label="Terminal" />
+              </div>
+
+              {/* Stop */}
+              <div className="p-4 rounded-lg border border-zinc-800 bg-bg-card space-y-2">
+                <div className="flex items-center gap-2 mb-2">
+                  <Square className="w-4 h-4 text-yellow-400" />
+                  <h3 className="text-white font-semibold">{t('Stop', '종료')}</h3>
+                </div>
+                <p className="text-sm text-zinc-400">
+                  {t(
+                    'Stop cokacdir. It will start again automatically when you restart your computer.',
+                    'cokacdir을 종료합니다. 컴퓨터를 재시작하면 다시 구동됩니다.'
+                  )}
+                </p>
+                <CopyBlock code="launchctl bootout gui/$(id -u)/com.cokacdir.server" label="Terminal" />
+              </div>
+
+              {/* Start */}
+              <div className="p-4 rounded-lg border border-zinc-800 bg-bg-card space-y-2">
+                <div className="flex items-center gap-2 mb-2">
+                  <Play className="w-4 h-4 text-accent-green" />
+                  <h3 className="text-white font-semibold">{t('Start', '시작')}</h3>
+                </div>
+                <p className="text-sm text-zinc-400">
+                  {t(
+                    'Restart cokacdir after stopping it.',
+                    'Stop으로 종료한 후 다시 시작하고자 할 때 실행합니다.'
+                  )}
+                </p>
+                <CopyBlock code="launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cokacdir.server.plist" label="Terminal" />
+              </div>
+
+              {/* Remove */}
+              <div className="p-4 rounded-lg border border-red-500/20 bg-red-500/5 space-y-2">
+                <div className="flex items-center gap-2 mb-2">
+                  <Trash2 className="w-4 h-4 text-red-400" />
+                  <h3 className="text-white font-semibold">{t('Remove', '제거')}</h3>
+                </div>
+                <p className="text-sm text-zinc-400">
+                  {t(
+                    'Stop cokacdir and remove it from auto-start. It will not start again after restarting your computer.',
+                    'cokacdir을 종료하고 자동 시작 등록을 제거합니다. 컴퓨터를 재시작해도 재구동되지 않습니다.'
+                  )}
+                </p>
+                <CopyBlock code="launchctl bootout gui/$(id -u)/com.cokacdir.server && rm ~/Library/LaunchAgents/com.cokacdir.server.plist" label="Terminal" />
+              </div>
+
             </div>
           </motion.section>
 

@@ -7,12 +7,17 @@ import MacOSPage from './components/macos/MacOSPage'
 import WindowsPage from './components/windows/WindowsPage'
 import WorkflowsPage from './components/workflows/WorkflowsPage'
 import TelegramTutorialPage from './components/telegram-tutorial/TelegramTutorialPage'
+import TipsPage from './components/tips/TipsPage'
 
 function ScrollToTop() {
-  const { pathname } = useLocation()
+  const { pathname, search } = useLocation()
   useEffect(() => {
-    window.scrollTo(0, 0)
-  }, [pathname])
+    const params = new URLSearchParams(search)
+    if (!params.get('s')) {
+      window.scrollTo(0, 0)
+    }
+    // When ?s= is present, individual pages handle section scrolling
+  }, [pathname, search])
   return null
 }
 
@@ -28,6 +33,7 @@ function App() {
         <Route path="/macos" element={<MacOSPage />} />
         <Route path="/windows" element={<WindowsPage />} />
         <Route path="/workflows" element={<WorkflowsPage />} />
+        <Route path="/tips" element={<TipsPage />} />
       </Routes>
     </>
   )

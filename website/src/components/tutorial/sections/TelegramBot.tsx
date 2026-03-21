@@ -515,6 +515,12 @@ export default function TelegramBot() {
                 <p className="text-zinc-500 text-xs font-semibold mb-2">Codex</p>
                 <code className="block text-zinc-500 font-mono text-sm">/model codex</code>
                 <code className="block text-zinc-500 font-mono text-sm">/model codex:gpt-5.4</code>
+                <code className="block text-zinc-500 font-mono text-sm">/model codex:gpt-5.3-codex</code>
+                <code className="block text-zinc-500 font-mono text-sm">/model codex:gpt-5.3-codex-spark</code>
+                <code className="block text-zinc-500 font-mono text-sm">/model codex:gpt-5.2-codex</code>
+                <code className="block text-zinc-500 font-mono text-sm">/model codex:gpt-5.2</code>
+                <code className="block text-zinc-500 font-mono text-sm">/model codex:gpt-5.1-codex-max</code>
+                <code className="block text-zinc-500 font-mono text-sm">/model codex:gpt-5.1-codex-mini</code>
               </div>
               <p className="text-zinc-400 text-sm leading-relaxed mt-2">
                 provider를 전환하면 (예: claude → codex) 기존 세션에서 빠져나옵니다. 다시 <code className="text-zinc-300 font-mono bg-bg-elevated px-1 py-0.5 rounded">/start</code>로 세션을 시작해야 합니다.
@@ -531,7 +537,122 @@ export default function TelegramBot() {
                 AI의 응답은 실시간으로 스트리밍되어 표시됩니다.
               </p>
             </div>
+
+            {/* 위치 공유 */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-accent-cyan font-semibold">Location / Venue Sharing</span>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                Telegram의 위치 공유 또는 장소 선택 기능으로 위치를 전송하면, 좌표 정보가 대기 큐에 기록됩니다.
+                이후 텍스트 메시지를 보내면 AI가 위치 정보를 컨텍스트로 함께 받습니다.
+              </p>
+              <code className="block text-zinc-500 font-mono text-sm bg-bg-elevated px-3 py-2 rounded mt-2">
+                [Location shared] Latitude: 37.5665, Longitude: 126.9780
+              </code>
+            </div>
+
+            {/* /session */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/session</code>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                현재 세션의 ID를 표시합니다.
+              </p>
+            </div>
+
+            {/* /instruction */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/instruction [text]</code>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                AI의 시스템 인스트럭션을 설정하거나 확인합니다.
+                텍스트를 입력하면 설정, 텍스트 없이 입력하면 현재 설정을 확인합니다.
+                <code className="text-zinc-300 font-mono bg-bg-elevated px-1 py-0.5 rounded">/instruction_clear</code>로 삭제할 수 있습니다.
+              </p>
+              <div className="bg-bg-elevated rounded p-3 mt-2 space-y-1">
+                <code className="block text-zinc-500 font-mono text-sm">/instruction 항상 한국어로 대답하세요</code>
+                <code className="block text-zinc-500 font-mono text-sm">/instruction</code>
+                <code className="block text-zinc-500 font-mono text-sm">/instruction_clear</code>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed mt-2">
+                자세한 활용법은 <a href="/#/tips?s=instruction" className="text-accent-cyan hover:underline font-medium">팁 & 가이드 → 시스템 인스트럭션</a>을 참고하세요.
+              </p>
+            </div>
+
+            {/* /public */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/public [on|off]</code>
+                <span className="text-xs bg-accent-purple/20 text-accent-purple px-2 py-0.5 rounded-full">GROUP</span>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                그룹 채팅에서 봇을 다른 멤버도 사용할 수 있게 허용합니다.
+                기본값은 소유자만 사용 가능합니다. 인자 없이 입력하면 현재 상태를 확인합니다.
+              </p>
+            </div>
+
+            {/* /direct */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/direct</code>
+                <span className="text-xs bg-accent-purple/20 text-accent-purple px-2 py-0.5 rounded-full">GROUP</span>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                그룹 채팅에서 <code className="text-zinc-300 font-mono bg-bg-elevated px-1 py-0.5 rounded">;</code> 접두사 없이 메시지를 보낼 수 있는 다이렉트 모드를 토글합니다.
+                봇이 하나만 있는 그룹에서 유용합니다.
+              </p>
+            </div>
+
+            {/* /query */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/query [message]</code>
+                <span className="text-xs bg-accent-purple/20 text-accent-purple px-2 py-0.5 rounded-full">GROUP</span>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                그룹 채팅에서 특정 봇에게 메시지를 보냅니다.
+                <code className="text-zinc-300 font-mono bg-bg-elevated px-1 py-0.5 rounded">/query@botname 메시지</code> 형식으로 사용합니다.
+              </p>
+            </div>
+
+            {/* /silent */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/silent</code>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                도구 호출 메시지 표시를 토글합니다. 활성화하면 AI가 도구를 호출할 때의 중간 메시지가 숨겨지고, 최종 결과만 표시됩니다.
+              </p>
+            </div>
+
+            {/* /debug */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/debug</code>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                디버그 로깅을 토글합니다. 활성화하면 서버 콘솔에 상세한 디버그 정보가 출력됩니다.
+              </p>
+            </div>
+
+            {/* /setpollingtime */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/setpollingtime &lt;ms&gt;</code>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                Telegram API 폴링 간격을 밀리초 단위로 설정합니다.
+              </p>
+            </div>
           </div>
+
+          <TipBox variant="note">
+            그룹 채팅에서의 봇 운용, 멀티 봇 협업, 접두사 체계(<code className="text-accent-cyan font-mono bg-bg-card px-1 py-0.5 rounded">;</code>, <code className="text-accent-cyan font-mono bg-bg-card px-1 py-0.5 rounded">@botname</code>)에 대한 자세한 내용은{' '}
+            <a href="/#/tips?s=group-chat" className="text-accent-cyan hover:underline font-medium">팁 & 가이드 → 그룹에서 여러 봇 다루기</a>를 참고하세요.
+          </TipBox>
 
           {/* ========== AI 도구 관리 ========== */}
           <SectionHeading id="telegram-tools" level={3}>AI 도구 관리</SectionHeading>
@@ -1370,6 +1491,12 @@ export default function TelegramBot() {
                 <p className="text-zinc-500 text-xs font-semibold mb-2">Codex</p>
                 <code className="block text-zinc-500 font-mono text-sm">/model codex</code>
                 <code className="block text-zinc-500 font-mono text-sm">/model codex:gpt-5.4</code>
+                <code className="block text-zinc-500 font-mono text-sm">/model codex:gpt-5.3-codex</code>
+                <code className="block text-zinc-500 font-mono text-sm">/model codex:gpt-5.3-codex-spark</code>
+                <code className="block text-zinc-500 font-mono text-sm">/model codex:gpt-5.2-codex</code>
+                <code className="block text-zinc-500 font-mono text-sm">/model codex:gpt-5.2</code>
+                <code className="block text-zinc-500 font-mono text-sm">/model codex:gpt-5.1-codex-max</code>
+                <code className="block text-zinc-500 font-mono text-sm">/model codex:gpt-5.1-codex-mini</code>
               </div>
               <p className="text-zinc-400 text-sm leading-relaxed mt-2">
                 Switching providers (e.g., claude → codex) will exit the current session. You'll need to run <code className="text-zinc-300 font-mono bg-bg-elevated px-1 py-0.5 rounded">/start</code> again to begin a new session.
@@ -1385,7 +1512,121 @@ export default function TelegramBot() {
                 AI responses are streamed in real-time.
               </p>
             </div>
+
+            {/* Location / Venue Sharing */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-accent-cyan font-semibold">Location / Venue Sharing</span>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                Share your location or select a venue in Telegram and the coordinates are recorded in a pending queue.
+                When you send a text message afterward, the AI receives the location information as context.
+              </p>
+              <code className="block text-zinc-500 font-mono text-sm bg-bg-elevated px-3 py-2 rounded mt-2">
+                [Location shared] Latitude: 37.5665, Longitude: 126.9780
+              </code>
+            </div>
+
+            {/* /session */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/session</code>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                Show the current session ID.
+              </p>
+            </div>
+
+            {/* /instruction */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/instruction [text]</code>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                Set or view the AI system instruction. With text, it sets the instruction. Without text, it shows the current one.
+                Use <code className="text-zinc-300 font-mono bg-bg-elevated px-1 py-0.5 rounded">/instruction_clear</code> to remove it.
+              </p>
+              <div className="bg-bg-elevated rounded p-3 mt-2 space-y-1">
+                <code className="block text-zinc-500 font-mono text-sm">/instruction Always respond in English</code>
+                <code className="block text-zinc-500 font-mono text-sm">/instruction</code>
+                <code className="block text-zinc-500 font-mono text-sm">/instruction_clear</code>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed mt-2">
+                See <a href="/#/tips?s=instruction" className="text-accent-cyan hover:underline font-medium">Tips & Guides — System Instruction</a> for detailed usage.
+              </p>
+            </div>
+
+            {/* /public */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/public [on|off]</code>
+                <span className="text-xs bg-accent-purple/20 text-accent-purple px-2 py-0.5 rounded-full">GROUP</span>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                Allow other members in a group chat to use the bot. Default is owner-only.
+                Without arguments, shows the current status.
+              </p>
+            </div>
+
+            {/* /direct */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/direct</code>
+                <span className="text-xs bg-accent-purple/20 text-accent-purple px-2 py-0.5 rounded-full">GROUP</span>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                Toggle direct mode — send messages without the <code className="text-zinc-300 font-mono bg-bg-elevated px-1 py-0.5 rounded">;</code> prefix in group chats.
+                Useful when you have only one bot in a group.
+              </p>
+            </div>
+
+            {/* /query */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/query [message]</code>
+                <span className="text-xs bg-accent-purple/20 text-accent-purple px-2 py-0.5 rounded-full">GROUP</span>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                Send a message to a specific bot in a group chat.
+                Use as <code className="text-zinc-300 font-mono bg-bg-elevated px-1 py-0.5 rounded">/query@botname message</code>.
+              </p>
+            </div>
+
+            {/* /silent */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/silent</code>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                Toggle tool call message visibility. When enabled, intermediate tool call messages are hidden and only the final result is shown.
+              </p>
+            </div>
+
+            {/* /debug */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/debug</code>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                Toggle debug logging. When enabled, detailed debug information is printed to the server console.
+              </p>
+            </div>
+
+            {/* /setpollingtime */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/setpollingtime &lt;ms&gt;</code>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                Set the Telegram API polling interval in milliseconds.
+              </p>
+            </div>
           </div>
+
+          <TipBox variant="note">
+            For details on group chat bot management, multi-bot collaboration, and prefix rules (<code className="text-accent-cyan font-mono bg-bg-card px-1 py-0.5 rounded">;</code>, <code className="text-accent-cyan font-mono bg-bg-card px-1 py-0.5 rounded">@botname</code>), see{' '}
+            <a href="/#/tips?s=group-chat" className="text-accent-cyan hover:underline font-medium">Tips & Guides — Multiple Bots in Group</a>.
+          </TipBox>
 
           {/* ========== Tool Management ========== */}
           <SectionHeading id="telegram-tools" level={3}>AI Tool Management</SectionHeading>

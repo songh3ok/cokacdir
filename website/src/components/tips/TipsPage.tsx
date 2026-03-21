@@ -1,9 +1,12 @@
 import { useEffect } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { motion } from 'framer-motion'
-import { ArrowLeft, Github, Send, BookOpen } from 'lucide-react'
-import TelegramTutorialSidebar from './TelegramTutorialSidebar'
-import TelegramBot from '../tutorial/sections/TelegramBot'
+import { ArrowLeft, Github, Lightbulb, BookOpen } from 'lucide-react'
+import TipsSidebar from './TipsSidebar'
+import ChangeModel from './articles/ChangeModel'
+import SessionManagement from './articles/SessionManagement'
+import GroupChatBots from './articles/GroupChatBots'
+import Instruction from './articles/Instruction'
 import { LanguageProvider, useLanguage } from '../tutorial/LanguageContext'
 
 function LanguageToggle() {
@@ -35,7 +38,7 @@ function LanguageToggle() {
   )
 }
 
-function TelegramTutorialPageInner() {
+function TipsPageInner() {
   const { t } = useLanguage()
   const location = useLocation()
   const scrollTarget = (location.state as { scrollTo?: string })?.scrollTo
@@ -72,8 +75,8 @@ function TelegramTutorialPageInner() {
 
           <div className="flex items-center gap-3">
             <span className="text-white font-semibold flex items-center gap-2">
-              <Send className="w-4 h-4 text-accent-cyan" />
-              <span className="hidden sm:inline">Telegram Bot Tutorial</span>
+              <Lightbulb className="w-4 h-4 text-accent-cyan" />
+              <span className="hidden sm:inline">{t('Tips & Guides', '팁 & 가이드')}</span>
             </span>
             <LanguageToggle />
           </div>
@@ -92,7 +95,7 @@ function TelegramTutorialPageInner() {
 
       {/* Main layout */}
       <div className="max-w-7xl mx-auto px-4 pt-24 pb-16 flex gap-8">
-        <TelegramTutorialSidebar />
+        <TipsSidebar />
 
         {/* Main content area */}
         <main className="flex-1 min-w-0">
@@ -104,25 +107,29 @@ function TelegramTutorialPageInner() {
             {/* Page title */}
             <div className="mb-12">
               <h1 className="text-3xl sm:text-4xl lg:text-5xl font-extrabold text-white mb-4">
-                {t('Telegram Bot Tutorial', '텔레그램 봇 튜토리얼')}
+                {t('Tips & Guides', '팁 & 가이드')}
               </h1>
               <p className="text-lg text-zinc-400 leading-relaxed max-w-3xl">
                 {t(
-                  'Learn how to set up and use the cokacdir Telegram bot for remote AI agent control. Create a bot, configure it, and manage your server from anywhere.',
-                  'cokacdir 텔레그램 봇을 설정하고 원격으로 AI 에이전트를 제어하는 방법을 알아봅니다. 봇 생성, 설정, 그리고 어디서든 서버를 관리하세요.'
+                  'Practical guides for common situations you encounter while using cokacdir. Each guide covers a specific topic with step-by-step instructions.',
+                  'cokacdir을 사용하면서 마주치는 다양한 상황에 대한 실용적인 가이드입니다. 각 가이드는 단계별 안내와 함께 특정 주제를 다룹니다.'
                 )}
               </p>
             </div>
 
-            <TelegramBot />
+            {/* Articles */}
+            <ChangeModel />
+            <SessionManagement />
+            <Instruction />
+            <GroupChatBots />
 
-            {/* Cross-link banner to file manager tutorial */}
+            {/* Cross-link banner */}
             <div className="mt-12 p-5 rounded-xl border border-accent-cyan/20 bg-accent-cyan/5">
               <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                 <div>
                   <h3 className="text-white font-semibold text-lg mb-1 flex items-center gap-2">
                     <BookOpen className="w-5 h-5 text-accent-cyan" />
-                    {t('File Manager Tutorial', '파일 관리자 튜토리얼')}
+                    {t('Full Tutorial', '전체 튜토리얼')}
                   </h3>
                   <p className="text-zinc-400 text-sm">
                     {t(
@@ -167,10 +174,10 @@ function TelegramTutorialPageInner() {
   )
 }
 
-export default function TelegramTutorialPage() {
+export default function TipsPage() {
   return (
     <LanguageProvider>
-      <TelegramTutorialPageInner />
+      <TipsPageInner />
     </LanguageProvider>
   )
 }

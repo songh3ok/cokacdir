@@ -39,6 +39,7 @@ function TutorialPageInner() {
   const { t } = useLanguage()
   const location = useLocation()
   const scrollTarget = (location.state as { scrollTo?: string })?.scrollTo
+    || new URLSearchParams(location.search).get('s')
 
   useEffect(() => {
     if (scrollTarget) {
