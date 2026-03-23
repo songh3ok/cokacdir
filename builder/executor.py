@@ -112,15 +112,25 @@ class BuildExecutor:
         self.logger.debug(f"Running: {' '.join(cmd)}")
 
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 cmd,
                 cwd=self.project_root,
                 env=env,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
             )
 
-            if result.returncode == 0:
+            output_lines = []
+            for line in process.stdout:
+                line_stripped = line.rstrip()
+                output_lines.append(line_stripped)
+                print(line_stripped, flush=True)
+
+            process.wait()
+            combined_output = "\n".join(output_lines)
+
+            if process.returncode == 0:
                 # Find the built binary
                 binary_path = self._find_binary(target)
                 self.logger.success(f"Built: {target.friendly_name}")
@@ -132,16 +142,11 @@ class BuildExecutor:
                 )
             else:
                 self.logger.error(f"Build failed for {target.friendly_name}")
-                # Print stderr for debugging
-                if result.stderr:
-                    for line in result.stderr.split("\n")[:20]:
-                        if line.strip():
-                            self.logger.debug(f"  {line}")
 
                 return BuildResult(
                     target=target,
                     success=False,
-                    error_message=result.stderr,
+                    error_message=combined_output,
                 )
 
         except Exception as e:
@@ -355,8 +360,9 @@ def run_build(
 
     # Check if cross-compilation setup is needed (zigbuild for macOS/Linux)
     needs_zigbuild_setup = any(t.needs_zigbuild for t in resolved_targets)
+    needs_sdk = tool_installer.config.host_os == "linux"
     if needs_zigbuild_setup:
-        if not tool_installer.is_zig_installed() or not tool_installer.is_macos_sdk_installed():
+        if not tool_installer.is_zig_installed() or (needs_sdk and not tool_installer.is_macos_sdk_installed()):
             logger.header("Cross-compilation Setup Required")
             if not tool_installer.setup_cross_compile():
                 return False

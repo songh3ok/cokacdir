@@ -358,7 +358,8 @@ def main() -> int:
     # Check if cross-compilation is needed
     if needs_cross_compilation(targets):
         # Check if cross-compilation tools are installed
-        if not tool_installer.is_zig_installed() or not tool_installer.is_macos_sdk_installed():
+        needs_sdk = tool_installer.config.host_os == "linux"
+        if not tool_installer.is_zig_installed() or (needs_sdk and not tool_installer.is_macos_sdk_installed()):
             if auto_setup:
                 logger.warning("Cross-compilation tools not installed. Installing...")
                 logger.newline()
